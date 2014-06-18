@@ -197,7 +197,7 @@ InfUdDriver::disconnect() {
 uint32_t
 InfUdDriver::getMaxPacketSize()
 {
-    const uint32_t eth = 1500 + 14 - sizeof(EthernetHeader);
+    const uint32_t eth = 1500 + 14 - (uint32_t)sizeof(EthernetHeader);
     const uint32_t inf = 2048 - GRH_SIZE;
     const size_t payloadSize = sizeof(static_cast<PacketBuf*>(NULL)->payload);
     static_assert(payloadSize >= eth,
