@@ -154,6 +154,11 @@ InfRcTransport::InfRcTransport(Context* context,
 {
     const char *ibDeviceName = NULL;
 
+    /* [amm] If a client calls this, then sl will be NULL and the -C argument to
+     * specify connection specifics will be ignored (e.g. use another IB port
+     * other than zero). XXX
+     */
+
     if (sl != NULL) {
         locatorString = sl->getOriginalString();
 
@@ -222,7 +227,13 @@ InfRcTransport::InfRcTransport(Context* context,
     //  Set up the initial verbs necessities: open the device, allocate
     //  protection domain, create shared receive queue, register buffers.
 
+    /* [amm] HP Labs BFC cluster machines have 2-port NICs XXX */
+#define ENV_RAMCLOUD_IB_PORT    "RAMCLOUD_IB_PORT"
+    if (getenv(ENV_RAMCLOUD_IB_PORT))
+        ibPhysicalPort = atoi(getenv(ENV_RAMCLOUD_IB_PORT));
+#undef ENV_RAMCLOUD_IB_PORT
     lid = infiniband->getLid(ibPhysicalPort);
+    LOG(NOTICE, "InfRc lid: %d\n", lid);
 
     // create two shared receive queues. all client queue pairs use one and all
     // server queue pairs use the other. we post receive buffer work requests

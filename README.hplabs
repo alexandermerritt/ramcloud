@@ -1,0 +1,77 @@
+===== ABOUT =====
+
+Branch created so code runs on BFC's APU IB machines.
+
+$ git checkout -b hplabs origin/hplabs
+
+===== BULIDING =====
+
+To build:
+    make [DEBUG=no]
+
+===== INFINIBAND =====
+
+Since the machines have two IB ports, you must specify which to use to RAMCloud,
+else things complain about being unable to find the local ID (LID).
+
+    ...,devport=2
+
+The device port can be found in the field 'port_lid'.
+
+$ ibv_devinfo
+hca_id: mlx4_0
+    transport:          InfiniBand (0)
+    fw_ver:             2.10.2280
+    node_guid:          24be:05ff:ff8c:e760
+    sys_image_guid:         24be:05ff:ff8c:e763
+    vendor_id:          0x02c9
+    vendor_part_id:         4099
+    hw_ver:             0x0
+    board_id:           HP_0280210019
+    phys_port_cnt:          2
+        port:   1
+            state:          PORT_DOWN (1)
+            max_mtu:        4096 (5)
+            active_mtu:     4096 (5)
+            sm_lid:         0
+ NO --->    port_lid:       0
+            port_lmc:       0x00
+            link_layer:     InfiniBand
+
+        port:   2
+            state:          PORT_ACTIVE (4)
+            max_mtu:        4096 (5)
+            active_mtu:     4096 (5)
+            sm_lid:         1
+ YES -->    port_lid:       8
+            port_lmc:       0x00
+            link_layer:     InfiniBand
+
+For the services (coordinator and storage server) the 'devport' option is
+honored. Unfortunately for clients it is not. I added a hack with an environment
+variable to correctly choose the right IB port to use on the local device:
+
+    RAMCLOUD_IB_PORT=N
+
+where N is the 'port' identifier above. You must choose the one which is in the
+PORT_ACTIVE state. If the port has a value of zero then you can ignore this
+variable as RAMCloud defaults to that port value when configuring the transport.
+
+===== EXECUTING =====
+
+Server A: run ZooKeeper and RAMCloud coordinator
+
+    $ startzk /tmp/zoo.cfg
+    $ ./rc-coord-ib
+
+Server B: run RAMCloud storage service
+
+    $ ./rc-storage-ib
+
+Server A: run RAMCloud-provided client
+
+    $ RAMCLOUD_IB_PORT=2 obj.hplabs/ClusterPerf \
+                       -C infrc:host=221-1,port=11100 \
+                       --testName basic \
+                       2>&1 | egrep '^basic' | tee perf.log
+

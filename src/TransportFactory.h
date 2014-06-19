@@ -78,7 +78,8 @@ class TransportFactory {
      * \param localServiceLocator
      *      The local address on which the transport should receive RPCs.
      *      May be NULL, indicating the Transport should only behave as a
-     *      client.
+     *      client. XXX This parameter should not have an implied meaning
+     *      derived from its existence.
      */
     virtual Transport*
     createTransport(Context* context,
