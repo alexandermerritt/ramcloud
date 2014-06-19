@@ -11,6 +11,7 @@
 *.diff
 
 /logs/
+/scripts/logs/
 /docs/doxygen/
 /docs/epydoc/
 /obj/
@@ -20,3 +21,6 @@
 /scripts/localconfig.py
 TAGS
 tags
+
+cscope.out
+cscope.files
