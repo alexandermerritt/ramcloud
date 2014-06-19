@@ -1,0 +1,9 @@
+#! /usr/bin/env bash
+set -e
+set -u
+source $(cd "$(dirname $0)" && pwd)/bfc-env.sh
+
+$RAMCLOUD_ROOT/obj.$GIT_BRANCH/coordinator \
+    -C infrc:host=$(hostname -s),port=11100,devport=$BFC_IB_PORT \
+    -x zk:221-1:2181
+

@@ -1,0 +1,13 @@
+#! /usr/bin/env bash
+set -e
+set -u
+source $(cd "$(dirname $0)" && pwd)/bfc-env.sh
+
+$RAMCLOUD_ROOT/obj.$GIT_BRANCH/server \
+    -L infrc:host=$(hostname -s),port=1101,devport=$BFC_IB_PORT \
+    -x zk:221-1:2181 \
+    --totalMasterMemory 2048 \
+    -f $RAMCLOUD_STORAGE_PATH \
+    --segmentFrames 64 \
+    -r $RAMCLOUD_REPLICATION
+
