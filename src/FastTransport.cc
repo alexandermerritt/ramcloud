@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012 Stanford University
+/* Copyright (c) 2010-2014 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any purpose
  * with or without fee is hereby granted, provided that the above copyright
@@ -394,15 +394,15 @@ FastTransport::InboundMessage::sendAck()
     header.payloadType = Header::ACK;
     Buffer payloadBuffer;
     AckResponse *ackResponse =
-        new(&payloadBuffer, APPEND) AckResponse(
-                                        downCast<uint16_t>(firstMissingFrag));
+        payloadBuffer.emplaceAppend<AckResponse>(
+                downCast<uint16_t>(firstMissingFrag));
     for (uint32_t i = 0; i < dataStagingWindow.getLength(); i++) {
         std::pair<char*, uint32_t> elt =
             dataStagingWindow[firstMissingFrag + 1 + i];
         if (elt.first)
             ackResponse->stagingVector |= (1 << i);
     }
-    Buffer::Iterator iter(payloadBuffer);
+    Buffer::Iterator iter(&payloadBuffer);
     transport->sendPacket(session->getAddress(), &header, &iter);
 }
 
@@ -872,7 +872,7 @@ FastTransport::OutboundMessage::sendOneData(uint32_t fragNumber,
     header.requestAck = requestAck;
     header.payloadType = Header::DATA;
     uint32_t dataPerFragment = transport->dataPerFragment();
-    Buffer::Iterator iter(*sendBuffer,
+    Buffer::Iterator iter(sendBuffer,
                           fragNumber * dataPerFragment,
                           dataPerFragment);
     transport->sendPacket(session->getAddress(), &header, &iter);
@@ -1152,9 +1152,9 @@ FastTransport::ServerSession::startSession(
 
     Buffer payload;
     SessionOpenResponse* sessionOpen;
-    sessionOpen = new(&payload, APPEND) SessionOpenResponse;
+    sessionOpen = payload.emplaceAppend<SessionOpenResponse>();
     sessionOpen->numChannels = NUM_CHANNELS_PER_SESSION;
-    Buffer::Iterator payloadIter(payload);
+    Buffer::Iterator payloadIter(&payload);
     transport->sendPacket(this->clientAddress.get(), &header, &payloadIter);
     lastActivityTime = transport->context->dispatch->currentTime;
 }

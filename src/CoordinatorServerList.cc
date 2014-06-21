@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2013 Stanford University
+/* Copyright (c) 2011-2014 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -1433,8 +1433,8 @@ CoordinatorServerList::UpdateServerListRpc::UpdateServerListRpc(
 {
     allocHeader<WireFormat::UpdateServerList>(serverId);
 
-    auto* part = new(&request, APPEND)
-            WireFormat::UpdateServerList::Request::Part();
+    auto* part = request.emplaceAppend<
+            WireFormat::UpdateServerList::Request::Part>();
 
     part->serverListLength = serializeToRequest(&request, list);
 }
@@ -1461,14 +1461,14 @@ CoordinatorServerList::UpdateServerListRpc::appendServerList(
     assert(this->getState() == NOT_STARTED);
     uint32_t sizeBefore = request.getTotalLength();
 
-    auto* part = new(&request, APPEND)
-            WireFormat::UpdateServerList::Request::Part();
+    auto* part = request.emplaceAppend<
+            WireFormat::UpdateServerList::Request::Part>();
 
     part->serverListLength = serializeToRequest(&request, list);
 
     uint32_t sizeAfter = request.getTotalLength();
     if (sizeAfter > Transport::MAX_RPC_LEN) {
-        request.truncateEnd(sizeAfter - sizeBefore);
+        request.truncate(sizeBefore);
         return false;
     }
 

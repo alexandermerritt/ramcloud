@@ -61,13 +61,12 @@ MultiRemove::appendRequest(MultiOpObject* request, Buffer* buf)
 
     // Add the current object to the list of those being
     // fetched by this RPC.
-    new(buf, APPEND)
-        WireFormat::MultiOp::Request::RemovePart(
-                req->tableId,
-                req->keyLength,
-                req->rejectRules ? *req->rejectRules :
-                                   defaultRejectRules);
-    buf->append(req->key, req->keyLength);
+    buf->emplaceAppend<WireFormat::MultiOp::Request::RemovePart>(
+            req->tableId,
+            req->keyLength,
+            req->rejectRules ? *req->rejectRules :
+                               defaultRejectRules);
+    buf->appendCopy(req->key, req->keyLength);
 }
 
 /**

@@ -1,4 +1,4 @@
-/* Copyright (c) 2013 Stanford University
+/* Copyright (c) 2013-2014 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any purpose
  * with or without fee is hereby granted, provided that the above copyright
@@ -107,7 +107,7 @@ ZooStorage::get(const char* name, Buffer* value)
     struct Stat stat;
     while (1) {
         value->reset();
-        char* buffer = new(value, APPEND) char[length];
+        char* buffer = static_cast<char*>(value->alloc(length));
         int status = zoo_get(zoo, fullName, 0, buffer, &length, &stat);
         if (status != ZOK) {
             if (status == ZNONODE) {
@@ -125,7 +125,7 @@ ZooStorage::get(const char* name, Buffer* value)
             length = stat.dataLength;
             continue;
         }
-        value->truncateEnd(value->getTotalLength() - length);
+        value->truncate(length);
         return true;
     }
 }

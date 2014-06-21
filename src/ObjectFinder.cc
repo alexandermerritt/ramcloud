@@ -128,10 +128,26 @@ ObjectFinder::ObjectFinder(Context* context)
 }
 
 /**
- * The method flush(tableId) removes all the entries in the tableMap
- * that contains tableId.
+ * This method deletes all cached information, restoring the object
+ * to its original pristine state. It's used primarily to force cached
+ * Session objects to be released during RAMCloud shutdown to avoid
+ * order-of-destruction problems where a transport could be deleted before
+ * all of its sessions.
+ */
+void ObjectFinder::reset()
+{
+    tableMap.clear();
+    tableIndexMap.clear();
+}
+
+/**
+ * This method is invoked when the caller has reason to believe that
+ * the configuration information for particular table is out-of-date.
+ * The method deletes all information related to that table; fresh
+ * information will be fetched from the coordinator the next time it
+ * is needed.
  * \param tableId
- *      the id of the table to be flushed.
+ *      The id of the table to be flushed.
  */
 void
 ObjectFinder::flush(uint64_t tableId) {
@@ -150,10 +166,10 @@ ObjectFinder::flush(uint64_t tableId) {
 
 /**
  * Return a string representation of all the table id's presented
- * at the tableMap at any given moment. Used mainly for debugging.
+ * at the tableMap at any given moment. Used mainly for testing.
  *
  * \return 
- *      string
+ *      A human-readable string describing the contents of tableMap.
  */
 string
 ObjectFinder::debugString() const {
@@ -214,8 +230,12 @@ ObjectFinder::lookup(uint64_t tableId, const void* key, uint16_t keyLength) {
 Transport::SessionRef
 ObjectFinder::lookup(uint64_t tableId, KeyHash keyHash)
 {
-    return context->transportManager->getSession(
-                lookupTablet(tableId, keyHash)->serviceLocator.c_str());
+    TabletWithLocator* tablet = lookupTablet(tableId, keyHash);
+    if (tablet->session == NULL) {
+        tablet->session = context->transportManager->getSession(
+                tablet->serviceLocator);
+    }
+    return tablet->session;
 }
 
 /**
@@ -238,13 +258,16 @@ Transport::SessionRef
 ObjectFinder::lookup(uint64_t tableId, uint8_t indexId,
                      const void* key, uint16_t keyLength)
 {
-    const Indexlet* indexlet = lookupIndexlet(tableId, indexId, key, keyLength);
+    Indexlet* indexlet = lookupIndexlet(tableId, indexId, key, keyLength);
     // If indexlet doesn't exist, don't throw an exception.
     if (indexlet == NULL) {
         return Transport::SessionRef();
     }
-    return context->transportManager->getSession(
-                        indexlet->serviceLocator.c_str());
+    if (indexlet->session == NULL) {
+        indexlet->session = context->transportManager->getSession(
+                indexlet->serviceLocator);
+    }
+    return indexlet->session;
 }
 
 /**
@@ -264,7 +287,7 @@ ObjectFinder::lookup(uint64_t tableId, uint8_t indexId,
  *      the specified key. This reference may be invalidated by any future
  *      calls to the ObjectFinder.
  */
-const ObjectFinder::Indexlet*
+ObjectFinder::Indexlet*
 ObjectFinder::lookupIndexlet(uint64_t tableId, uint8_t indexId,
                              const void* key, uint16_t keyLength)
 {
@@ -321,7 +344,7 @@ ObjectFinder::lookupIndexlet(uint64_t tableId, uint8_t indexId,
  * \throw TableDoesntExistException
  *      The coordinator has no record of the table.
  */
-const TabletWithLocator*
+TabletWithLocator*
 ObjectFinder::lookupTablet(uint64_t tableId, KeyHash keyHash)
 {
     bool haveRefreshed = false;
@@ -330,7 +353,7 @@ ObjectFinder::lookupTablet(uint64_t tableId, KeyHash keyHash)
     while (true) {
         iter = tableMap.upper_bound(key);
         if (!tableMap.empty() && iter != tableMap.begin()) {
-            const TabletWithLocator* tabletWithLocator = &((--iter)->second);
+            TabletWithLocator* tabletWithLocator = &((--iter)->second);
             if (tabletWithLocator->tablet.tableId == tableId &&
               tabletWithLocator->tablet.startKeyHash <= keyHash &&
               keyHash <= tabletWithLocator->tablet.endKeyHash) {
@@ -369,10 +392,11 @@ void
 ObjectFinder::flushSession(uint64_t tableId, KeyHash keyHash)
 {
     try {
-        const TabletWithLocator* tabletWithLocator = lookupTablet(tableId,
+        TabletWithLocator* tabletWithLocator = lookupTablet(tableId,
                                                                 keyHash);
         context->transportManager->flushSession(
-                                    tabletWithLocator->serviceLocator.c_str());
+                                    tabletWithLocator->serviceLocator);
+        tabletWithLocator->session = NULL;
     } catch (TableDoesntExistException& e) {
         // We don't even store this tablet anymore, so there's nothing
         // to worry about.
@@ -399,11 +423,12 @@ void
 ObjectFinder::flushSession(uint64_t tableId, uint8_t indexId,
                            const void* key, uint16_t keyLength)
 {
-    const Indexlet* indexlet = lookupIndexlet(tableId, indexId,
+    Indexlet* indexlet = lookupIndexlet(tableId, indexId,
                                               key, keyLength);
     if (indexlet != NULL) {
         context->transportManager->flushSession(
-                        indexlet->serviceLocator.c_str());
+                        indexlet->serviceLocator);
+        indexlet->session = NULL;
     }
 }
 
@@ -459,9 +484,9 @@ ObjectFinder::waitForAllTabletsNormal(uint64_t tableId, uint64_t timeoutNs)
 {
     uint64_t start = Cycles::rdtsc();
     RAMCLOUD_TEST_LOG("flushing object map");
-    flush(tableId);
     while (Cycles::toNanoseconds(Cycles::rdtsc() - start) < timeoutNs) {
         bool allNormal = true;
+        flush(tableId);
         tableConfigFetcher->getTableConfig(tableId, &tableMap, &tableIndexMap);
         TabletKey start {tableId, 0U};
         TabletKey end {tableId, std::numeric_limits<KeyHash>::max()};
@@ -476,7 +501,7 @@ ObjectFinder::waitForAllTabletsNormal(uint64_t tableId, uint64_t timeoutNs)
         }
         if (allNormal && tableMap.size() > 0)
             return;
-        usleep(200);
+        usleep(10000);
     }
 }
 

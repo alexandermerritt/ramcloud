@@ -120,12 +120,13 @@ Object::Object(Key& key,
     if (length)
         *length = keysAndValueLength;
 
-    uint8_t *keyInfo = new(&buffer, APPEND) uint8_t[primaryKeyInfoLength];
+    uint8_t* keyInfo = static_cast<uint8_t*>(
+            buffer.alloc(primaryKeyInfoLength));
 
     KeyCount keyCount = 1;
     KeyLength keyLength = static_cast<KeyLength>
                                 (key.getStringKeyLength());
-    const void *keyString = key.getStringKey();
+    const void* keyString = key.getStringKey();
     memcpy(keyInfo, &keyCount, sizeof(KeyCount));
     memcpy(keyInfo + sizeof(KeyCount), &keyLength, sizeof(KeyLength));
     memcpy(keyInfo + KEY_INFO_LENGTH(1), keyString, keyLength);
@@ -244,7 +245,7 @@ Object::appendValueToBuffer(Buffer& buffer, uint32_t valueOffset)
 
     Buffer* sourceBuffer = keysAndValueBuffer;
 
-    Buffer::Iterator it(*sourceBuffer, keysAndValueOffset + valueOffset,
+    Buffer::Iterator it(sourceBuffer, keysAndValueOffset + valueOffset,
                         getValueLength());
     while (!it.isDone()) {
         buffer.append(it.getData(), it.getLength());
@@ -271,7 +272,7 @@ Object::appendKeysAndValueToBuffer(Buffer& buffer)
     // at keysAndValueOffset
     Buffer* sourceBuffer = keysAndValueBuffer;
 
-    Buffer::Iterator it(*sourceBuffer, keysAndValueOffset, keysAndValueLength);
+    Buffer::Iterator it(sourceBuffer, keysAndValueOffset, keysAndValueLength);
     while (!it.isDone()) {
         buffer.append(it.getData(), it.getLength());
         it.next();
@@ -318,8 +319,7 @@ Object::appendKeysAndValueToBuffer(uint64_t tableId,
         // allocate memory first for number of keys and all the cumulative
         // length values
         KeyOffsets *keyOffsetsHelper = reinterpret_cast<KeyOffsets *>(
-                                    new(&request, APPEND)
-                                    uint8_t[KEY_INFO_LENGTH(numKeys)]);
+                                    request.alloc(KEY_INFO_LENGTH(numKeys)));
         keyOffsetsHelper->numKeys = numKeys;
         CumulativeKeyLength *cumLengths = keyOffsetsHelper->cumulativeLengths;
 
@@ -347,7 +347,7 @@ Object::appendKeysAndValueToBuffer(uint64_t tableId,
                                     currentKeyLength);
             totalKeyLength += currentKeyLength;
         }
-        void *keys = new(&request, APPEND) uint8_t[totalKeyLength];
+        void *keys = request.alloc(totalKeyLength);
         uint8_t *dest = reinterpret_cast<uint8_t *>(keys);
         for (i = 0; i < numKeys; i++) {
             // this key doesn't exist
@@ -404,7 +404,8 @@ Object::appendKeysAndValueToBuffer(
     if (length)
         *length = primaryKeyInfoLength + valueLength;
 
-    uint8_t *keyInfo = new(&buffer, APPEND) uint8_t[primaryKeyInfoLength];
+    uint8_t* keyInfo = static_cast<uint8_t*>(
+            buffer.alloc(primaryKeyInfoLength));
 
     KeyCount keyCount = 1;
     KeyLength keyLength = static_cast<KeyLength>
@@ -877,7 +878,7 @@ ObjectTombstone::appendKeyToBuffer(Buffer& buffer)
         return;
     }
 
-    Buffer::Iterator it(*tombstoneBuffer,
+    Buffer::Iterator it(tombstoneBuffer,
                         keyOffset,
                         getKeyLength());
     while (!it.isDone()) {

@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012 Stanford University
+/* Copyright (c) 2010-2014 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any purpose
  * with or without fee is hereby granted, provided that the above copyright
@@ -92,6 +92,7 @@
 #include "ServiceManager.h"
 #include "ShortMacros.h"
 #include "PerfCounter.h"
+#include "TimeTrace.h"
 
 #define check_error_null(x, s)                              \
     do {                                                    \
@@ -965,7 +966,7 @@ InfRcTransport::ServerRpc::sendReply()
     }
 
     BufferDescriptor* bd = t->getTransmitBuffer();
-    new(&replyPayload, PREPEND) Header(nonce);
+    replyPayload.emplacePrepend<Header>(nonce);
     {
         CycleCounter<RawMetric> copyTicks(
             &metrics->transport.transmit.copyTicks);
@@ -1060,24 +1061,32 @@ InfRcTransport::ClientRpc::sendZeroCopy(Buffer* request)
 {
     const bool allowZeroCopy = true;
     InfRcTransport* const t = transport;
-    uint32_t numSges = request->getNumberChunks();
-    if (request->getNumberChunks() > MAX_TX_SGE_COUNT)
-        numSges = MAX_TX_SGE_COUNT;
-    ibv_sge isge[numSges];
+    uint32_t lastChunkIndex = request->getNumberChunks() - 1;
+    ibv_sge isge[MAX_TX_SGE_COUNT];
 
     uint32_t currentChunk = 0;
     uint32_t currentSge = 0;
     BufferDescriptor* bd = t->getTransmitBuffer();
     char* unaddedStart = bd->buffer;
     char* unaddedEnd = bd->buffer;
-    Buffer::Iterator it(*request);
+    Buffer::Iterator it(request);
     while (!it.isDone()) {
         const uintptr_t addr = reinterpret_cast<const uintptr_t>(it.getData());
+        // See if we can transmit this chunk from its current location
+        // (zero copy) vs. copying it into a transmit buffer:
+        // * The chunk must lie in the range of registered memory that
+        //   the NIC knows about.
+        // * If we run out of sges, then everything has to be copied
+        //   (but save the last sge for the last chunk, since it's the
+        //   one most likely to benefit from zero copying.
+        // * For small chunks, it's cheaper to copy than to send a
+        //   separate descriptor to the NIC.
         if (allowZeroCopy &&
-            (currentChunk == request->getNumberChunks() - 1 ||
-             currentSge < numSges - 1) &&
+            (currentSge < MAX_TX_SGE_COUNT - 1 ||
+             currentChunk == lastChunkIndex) &&
             addr >= t->logMemoryBase &&
-            (addr + it.getLength()) <= (t->logMemoryBase + t->logMemoryBytes))
+            (addr + it.getLength()) <= (t->logMemoryBase + t->logMemoryBytes) &&
+            it.getLength() > 500)
         {
             if (unaddedStart != unaddedEnd) {
                 isge[currentSge] = {
@@ -1170,7 +1179,7 @@ InfRcTransport::ClientRpc::sendOrQueue()
         ++metrics->transport.transmit.messageCount;
         ++metrics->transport.transmit.packetCount;
 
-        new(request, PREPEND) Header(nonce);
+        request->emplacePrepend<Header>(nonce);
         sendZeroCopy(request);
         request->truncateFront(sizeof(Header)); // for politeness
 
@@ -1221,9 +1230,7 @@ InfRcTransport::Poller::poll()
                 if (t->numUsedClientSrqBuffers >=
                         MAX_SHARED_RX_QUEUE_DEPTH / 2) {
                     // clientSrq is low on buffers, better return this one
-                    memcpy(new(rpc.response, APPEND) char[len],
-                           bd->buffer + sizeof(header),
-                           len);
+                    rpc.response->appendCopy(bd->buffer + sizeof(header), len);
                     t->postSrqReceiveAndKickTransmit(t->clientSrq, bd);
                 } else {
                     // rpc will hold one of clientSrq's buffers until
@@ -1299,8 +1306,7 @@ InfRcTransport::Poller::poll()
                 // the buffer immediately.
                 LOG(NOTICE, "Receive buffers running low; copying %u-byte "
                     "request", len);
-                memcpy(new(&r->requestPayload, APPEND) char[len],
-                        bd->buffer + sizeof(header), len);
+                r->requestPayload.appendCopy(bd->buffer + sizeof(header), len);
                 t->postSrqReceiveAndKickTransmit(t->serverSrq, bd);
             } else {
                 // Let the request use the NIC's buffer directly in order
@@ -1359,9 +1365,9 @@ InfRcTransport::PayloadChunk::prependToBuffer(Buffer* buffer,
                                              ibv_srq* srq,
                                              BufferDescriptor* bd)
 {
-    PayloadChunk* chunk =
-        new(buffer, CHUNK) PayloadChunk(data, dataLength, transport, srq, bd);
-    Buffer::Chunk::prependChunkToBuffer(buffer, chunk);
+    PayloadChunk* chunk = buffer->allocAux<PayloadChunk>(data, dataLength,
+            transport, srq, bd);
+    buffer->prependChunk(chunk);
     return chunk;
 }
 
@@ -1391,9 +1397,9 @@ InfRcTransport::PayloadChunk::appendToBuffer(Buffer* buffer,
                                             ibv_srq* srq,
                                             BufferDescriptor* bd)
 {
-    PayloadChunk* chunk =
-        new(buffer, CHUNK) PayloadChunk(data, dataLength, transport, srq, bd);
-    Buffer::Chunk::appendChunkToBuffer(buffer, chunk);
+    PayloadChunk* chunk = buffer->allocAux<PayloadChunk>(data, dataLength,
+            transport, srq, bd);
+    buffer->appendChunk(chunk);
     return chunk;
 }
 

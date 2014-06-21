@@ -340,8 +340,8 @@ Segment::appendLogHeader(LogEntryType type,
     // Allocate memory in the buffer for the entry header and the number
     // of length bytes required
     EntryHeader *header = reinterpret_cast<EntryHeader *>(
-                            new(logBuffer, APPEND) uint8_t[sizeof(EntryHeader) +
-                            entryHeader.getLengthBytes()]);
+                            logBuffer->alloc(sizeof(EntryHeader) +
+                            entryHeader.getLengthBytes()));
     *header = entryHeader;
     memcpy(header + 1, &objectSize, entryHeader.getLengthBytes());
 }
@@ -905,7 +905,7 @@ Segment::copyInFromBuffer(uint32_t segmentOffset,
                           uint32_t length)
 {
     uint32_t bytesCopied = 0;
-    Buffer::Iterator it(buffer, bufferOffset, length);
+    Buffer::Iterator it(&buffer, bufferOffset, length);
     while (!it.isDone()) {
         uint32_t bytes = copyIn(segmentOffset, it.getData(), it.getLength());
 

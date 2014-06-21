@@ -91,7 +91,8 @@ class ObjectTest : public ::testing::Test {
 
         // prepend some garbage to buffer2 so that we can test the constructor
         // with a non-zero offset
-        buffer2.prepend(&stringKeys[0], sizeof(stringKeys[0]));
+        memcpy(buffer2.allocPrepend(sizeof(stringKeys[0])), &stringKeys[0],
+                sizeof(stringKeys[0]));
 
         objectFromBuffer.construct(buffer2, sizeof32(stringKeys[0]),
                                    buffer2.getTotalLength() -
@@ -414,8 +415,8 @@ TEST_F(ObjectTest, assembleForLog) {
 TEST_F(ObjectTest, assembleForLog_contigMemory) {
     Object& object = *singleKeyObject;
     Buffer buffer;
-    uint8_t *target = new(&buffer, APPEND)
-                      uint8_t[object.getSerializedLength()];
+    uint8_t* target = static_cast<uint8_t*>(buffer.alloc(
+            object.getSerializedLength()));
 
     object.assembleForLog(target);
     Object::Header* header = reinterpret_cast<Object::Header *>(target);
@@ -712,8 +713,7 @@ TEST_F(ObjectTest, checkIntegrity) {
         EXPECT_TRUE(object.checkIntegrity());
 
         // screw up the first byte (in the Header)
-        uint8_t* evil = reinterpret_cast<uint8_t*>(
-            const_cast<void*>(buffer.getRange(0, 1)));
+        uint8_t* evil = reinterpret_cast<uint8_t*>(&object.header);
         uint8_t tmp = *evil;
         *evil = static_cast<uint8_t>(~*evil);
         EXPECT_FALSE(object.checkIntegrity());
@@ -722,8 +722,7 @@ TEST_F(ObjectTest, checkIntegrity) {
         // screw up the first byte - the number of keys
         EXPECT_TRUE(object.checkIntegrity());
         evil = reinterpret_cast<uint8_t*>(
-            const_cast<void*>(buffer.getRange(
-                sizeof(object.header), 1)));
+            const_cast<void*>(buffer.getRange(0, 1)));
         tmp = *evil;
         *evil = static_cast<uint8_t>(~*evil);
         EXPECT_FALSE(object.checkIntegrity());
@@ -732,8 +731,7 @@ TEST_F(ObjectTest, checkIntegrity) {
         // screw up the first byte in the first key
         EXPECT_TRUE(object.checkIntegrity());
         evil = reinterpret_cast<uint8_t*>(
-            const_cast<void*>(buffer.getRange(
-                sizeof(object.header) + 7, 1)));
+            const_cast<void*>(buffer.getRange(7, 1)));
         tmp = *evil;
         *evil = static_cast<uint8_t>(~*evil);
         EXPECT_FALSE(object.checkIntegrity());
@@ -787,7 +785,8 @@ class ObjectTombstoneTest : public ::testing::Test {
         // prepend some garbage into the buffer so that we
         // can test the constructor with a non-zero starting
         // offset
-        buffer.prepend(stringKey, sizeof32(stringKey));
+        memcpy(buffer.allocPrepend(sizeof32(stringKey)), stringKey,
+                sizeof32(stringKey));
         tombstoneFromBuffer.construct(buffer, sizeof32(stringKey),
                                       buffer.getTotalLength() -
                                       sizeof32(stringKey));
@@ -876,8 +875,8 @@ TEST_F(ObjectTombstoneTest, assembleForLog_contigMemory) {
     for (uint32_t i = 0; i < arrayLength(tombstones); i++) {
         ObjectTombstone& tombstone = *tombstones[i];
         Buffer buffer;
-        uint8_t *target = new(&buffer, APPEND)
-                          uint8_t[tombstone.getSerializedLength()];
+        uint8_t* target = static_cast<uint8_t*>(buffer.alloc(
+                tombstone.getSerializedLength()));
 
         tombstone.assembleForLog(target);
         ObjectTombstone::Header* header = reinterpret_cast<

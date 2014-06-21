@@ -92,6 +92,9 @@ RamCloud::RamCloud(Context* context, const char* locator,
 
 RamCloud::~RamCloud()
 {
+    // Force ObjectManager to drop all of its cached sessions; otherwise
+    // they won't get destroyed until after their transports have been deleted.
+    objectFinder.reset();
     realClientContext.destroy();
 }
 
@@ -160,7 +163,7 @@ CreateTableRpc::CreateTableRpc(RamCloud* ramcloud,
             allocHeader<WireFormat::CreateTable>());
     reqHdr->nameLength = length;
     reqHdr->serverSpan = serverSpan;
-    memcpy(new(&request, APPEND) char[length], name, length);
+    request.appendCopy(name, length);
     send();
 }
 
@@ -219,7 +222,7 @@ DropTableRpc::DropTableRpc(RamCloud* ramcloud,
     WireFormat::DropTable::Request* reqHdr(
             allocHeader<WireFormat::DropTable>());
     reqHdr->nameLength = length;
-    memcpy(new(&request, APPEND) char[length], name, length);
+    request.appendCopy(name, length);
     send();
 }
 
@@ -417,7 +420,7 @@ EnumerateTableRpc::EnumerateTableRpc(RamCloud* ramcloud, uint64_t tableId,
     reqHdr->keysOnly = keysOnly;
     reqHdr->tabletFirstHash = tabletFirstHash;
     reqHdr->iteratorBytes = state.getTotalLength();
-    for (Buffer::Iterator it(state); !it.isDone(); it.next())
+    for (Buffer::Iterator it(&state); !it.isDone(); it.next())
         request.append(it.getData(), it.getLength());
     send();
 }
@@ -454,8 +457,11 @@ EnumerateTableRpc::wait(Buffer& state)
     // Copy iterator from response into nextIter buffer.
     uint32_t iteratorBytes = respHdr->iteratorBytes;
     state.reset();
-    response->copy(downCast<uint32_t>(sizeof(*respHdr) + respHdr->payloadBytes),
-            iteratorBytes, new(&state, APPEND) char[iteratorBytes]);
+    if (iteratorBytes != 0) {
+        response->copy(
+                downCast<uint32_t>(sizeof(*respHdr) + respHdr->payloadBytes),
+                iteratorBytes, state.alloc(iteratorBytes));
+    }
 
     // Truncate the front and back of the response buffer, leaving just the
     // objects (the response buffer is the \c objects argument from
@@ -463,7 +469,7 @@ EnumerateTableRpc::wait(Buffer& state)
     assert(response->getTotalLength() == sizeof(*respHdr) +
             respHdr->iteratorBytes + respHdr->payloadBytes);
     response->truncateFront(sizeof(*respHdr));
-    response->truncateEnd(respHdr->iteratorBytes);
+    response->truncate(response->size() - respHdr->iteratorBytes);
 
     return result;
 }
@@ -893,7 +899,7 @@ GetTableIdRpc::GetTableIdRpc(RamCloud* ramcloud,
     WireFormat::GetTableId::Request* reqHdr(
             allocHeader<WireFormat::GetTableId>());
     reqHdr->nameLength = length;
-    memcpy(new(&request, APPEND) char[length], name, length);
+    request.appendCopy(name, length);
     send();
 }
 
@@ -1143,7 +1149,7 @@ IndexedReadRpc::IndexedReadRpc(RamCloud* ramcloud, uint64_t tableId,
     reqHdr->numHashes = numHashes;
     request.appendCopy(firstKey, firstKeyLength);
     request.appendCopy(lastKey, lastKeyLength);
-    request.append(pKHashes, 0);
+    request.append(pKHashes, 0, pKHashes->size());
     send();
 }
 
@@ -2025,7 +2031,7 @@ SplitTabletRpc::SplitTabletRpc(RamCloud* ramcloud,
             allocHeader<WireFormat::SplitTablet>());
     reqHdr->nameLength = length;
     reqHdr->splitKeyHash = splitKeyHash;
-    memcpy(new(&request, APPEND) char[length], name, length);
+    request.appendCopy(name, length);
     send();
 }
 

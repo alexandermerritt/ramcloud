@@ -1,4 +1,4 @@
-/* Copyright (c) 2013 Stanford University
+/* Copyright (c) 2013-2014 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any purpose
  * with or without fee is hereby granted, provided that the above copyright
@@ -15,6 +15,7 @@
 
 #include "MultiOp.h"
 #include "ShortMacros.h"
+#include "TimeTrace.h"
 
 namespace RAMCloud {
 
@@ -230,7 +231,7 @@ MultiOp::startRpcs()
 
                     // Check that request isn't too big in general
                     if (lengthAfter - lengthBefore > maxRequestSize) {
-                        rpc->request.truncateEnd(lengthAfter - lengthBefore);
+                        rpc->request.truncate(lengthBefore);
                         request->status = STATUS_REQUEST_TOO_LARGE;
                         removeRequestAt(i);
                         break;
@@ -238,7 +239,7 @@ MultiOp::startRpcs()
 
                     // Check for full rpc, remove + retry
                     if (lengthAfter > maxRequestSize) {
-                        rpc->request.truncateEnd(lengthAfter - lengthBefore);
+                        rpc->request.truncate(lengthBefore);
                         activeRpcCnt++;
                         rpc->send();
                         continue;
@@ -473,7 +474,7 @@ MultiOp::PartRpc::handleTransportError()
     // will all be retried when \c finish is called.
     if (session.get() != NULL) {
         ramcloud->clientContext->transportManager->flushSession(
-                session->getServiceLocator().c_str());
+                session->getServiceLocator());
         session = NULL;
     }
     for (uint32_t i = 0; i < reqHdr->count; i++) {

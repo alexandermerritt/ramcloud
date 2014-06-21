@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012 Stanford University
+/* Copyright (c) 2010-2014 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any purpose
  * with or without fee is hereby granted, provided that the above copyright
@@ -270,8 +270,8 @@ MockTransport::appendToOutput(Event event, const string& message)
     output.emplace_back();
     auto& pair = output.back();
     pair.first = event;
-    char* dst = new(&pair.second, APPEND) char[message.length() + 1];
-    memcpy(dst, message.c_str(), message.length() + 1);
+    pair.second.appendCopy(message.c_str(),
+            downCast<uint32_t>(message.length() + 1));
 }
 
 /**
@@ -292,8 +292,11 @@ MockTransport::appendToOutput(Event event, Buffer& payload)
     output.emplace_back();
     auto& pair = output.back();
     pair.first = event;
-    void* chunk = new(&pair.second, APPEND) char[payload.getTotalLength()];
-    payload.copy(0, payload.getTotalLength(), chunk);
+    uint32_t length = payload.getTotalLength();
+    if (length > 0) {
+        void* chunk = pair.second.alloc(length);
+        payload.copy(0, payload.getTotalLength(), chunk);
+    }
 }
 
 /**

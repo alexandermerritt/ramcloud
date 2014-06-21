@@ -55,9 +55,7 @@ class RpcWrapperTest : public ::testing::Test {
 
     void
     setStatus(Buffer* buffer, Status status) {
-        WireFormat::ResponseCommon& header(
-                *new(buffer, APPEND) WireFormat::ResponseCommon);
-        header.status = status;
+        buffer->emplaceAppend<WireFormat::ResponseCommon>()->status = status;
     }
 
     DISALLOW_COPY_AND_ASSIGN(RpcWrapperTest);
@@ -175,7 +173,7 @@ TEST_F(RpcWrapperTest, isReady_retryResponseTooShort) {
     wrapper.session = session;
     Service::prepareRetryResponse(wrapper.response, 1000, 2000,
             "sample message");
-    wrapper.response->truncateEnd(2);
+    wrapper.response->truncate(wrapper.response->size() - 2);
     wrapper.state = RpcWrapper::RpcState::FINISHED;
     EXPECT_FALSE(wrapper.isReady());
     EXPECT_EQ("isReady: Server test:server=1 returned STATUS_RETRY "
@@ -297,7 +295,7 @@ TEST_F(RpcWrapperTest, simpleWait_success) {
     RpcWrapper wrapper(4);
     wrapper.request.fillFromString("100");
     wrapper.send();
-    (new(wrapper.response, APPEND) WireFormat::ResponseCommon)->status =
+    wrapper.response->emplaceAppend<WireFormat::ResponseCommon>()->status =
             STATUS_OK;
     wrapper.state = RpcWrapper::RpcState::FINISHED;
     wrapper.simpleWait(context.dispatch);
@@ -308,7 +306,7 @@ TEST_F(RpcWrapperTest, simpleWait_errorStatus) {
     RpcWrapper wrapper(4);
     wrapper.request.fillFromString("100");
     wrapper.send();
-    (new(wrapper.response, APPEND) WireFormat::ResponseCommon)->status =
+    wrapper.response->emplaceAppend<WireFormat::ResponseCommon>()->status =
             STATUS_UNIMPLEMENTED_REQUEST;
     wrapper.state = RpcWrapper::RpcState::FINISHED;
     string message = "no exception";

@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2012 Stanford University
+/* Copyright (c) 2009-2014 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -146,8 +146,8 @@ appendObjectsToBuffer(Log& log,
             return index;
         }
 
-        new(buffer, APPEND) uint32_t(length);
-        Buffer::Iterator it(objectBuffer, 0, length);
+        buffer->emplaceAppend<uint32_t>(length);
+        Buffer::Iterator it(&objectBuffer, 0, length);
         while (!it.isDone()) {
             buffer->append(it.getData(), it.getLength());
             it.next();
@@ -310,7 +310,7 @@ Enumeration::complete()
 
     // Clean up if last bucket is incomplete.
     if (payloadFull) {
-        payload.truncateEnd(payload.getTotalLength() - bucketStart);
+        payload.truncate(bucketStart);
 
         // If we failed to enumerate at least one entire bucket, then
         // sort the current bucket and fill the buffer with whatever
