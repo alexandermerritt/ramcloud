@@ -1,6 +1,13 @@
 ===== ABOUT =====
 
-Branch created so code runs on BFC's APU IB machines.
+Git repository locations:
+
+origin   ssh://gitolite@git-pa1.hpl.hp.com/simpl/alex-ramcloud
+stanford git://fiz.stanford.edu/git/ramcloud.git
+
+Branch 'hplabs' created so code runs on BFC's APU IB machines.
+
+On the BFC, use the image alex-saucy-apu to boot machines.
 
 $ git checkout -b hplabs origin/hplabs
 
