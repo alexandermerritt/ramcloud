@@ -2253,10 +2253,6 @@ readDist()
     // Output the times (several comma-separated values on each line).
     int valuesInLine = 0;
     for (int i = 0; i < count; i++) {
-        if (valuesInLine >= 10) {
-            valuesInLine = 0;
-            printf("\n");
-        }
         if (valuesInLine != 0) {
             printf(",");
         }
