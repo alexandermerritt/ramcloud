@@ -50,6 +50,9 @@ SessionAlarm::SessionAlarm(SessionAlarmTimer* timer,
         pingMs = 3*SessionAlarmTimer::TIMER_INTERVAL_MS;
         abortMs = 2*pingMs;
     }
+    const char *timeoutEnv = getenv("RAMCLOUD_ABORT_TIMEOUT");
+    if (timeoutEnv)
+        abortMs = atoi(timeoutEnv);
 }
 
 /**
