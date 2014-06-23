@@ -25,6 +25,7 @@
 #include "Buffer.h"
 #include "ServiceLocator.h"
 #include "PerfCounter.h"
+#include "Segment.h" // need DEFAULT_SEGMENT_SIZE
 
 namespace RAMCloud {
 
@@ -60,7 +61,10 @@ class Transport {
 
       /// Maximum allowable size for an RPC request or response message: must
       /// be large enough to hold an 8MB segment plus header information.
-      static const uint32_t MAX_RPC_LEN = ((1 << 23) + 200);
+      // [amm] un-hardcoded to incorporate actual segment size. if this is 'too
+      // big', e.g. 64MiB+ then the storage server dies gracefully as the coord
+      // cannot communicate with it
+      static const uint32_t MAX_RPC_LEN = (Segment::DEFAULT_SEGMENT_SIZE + 200);
 
     /**
      * An RPC request that has been received and is either being serviced or
