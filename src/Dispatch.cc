@@ -146,8 +146,8 @@ Dispatch::poll()
         nextInd = (nextInd + 1) % totalElements;
     }
     if (((currentTime - previous) > slowPollerCycles) && hasDedicatedThread) {
-        LOG(NOTICE, "Long gap in dispatcher: %lu ms",
-                Cycles::toMicroseconds(currentTime - previous));
+        //LOG(NOTICE, "Long gap in dispatcher: %lu ms",
+                //Cycles::toMicroseconds(currentTime - previous));
     }
     if (lockNeeded.load() != 0) {
         // Someone wants us locked. Indicate that we are locked,
