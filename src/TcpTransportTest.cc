@@ -422,9 +422,9 @@ TEST_F(TcpTransportTest, sendMessage_sendPartOfHeader) {
 TEST_F(TcpTransportTest, sendMessage_multipleChunks) {
     int fd = connectToServer(locator);
     Buffer payload;
-    payload.append("abcde", 5);
-    payload.append("xxx", 3);
-    payload.append("12345678", 8);
+    payload.appendExternal("abcde", 5);
+    payload.appendExternal("xxx", 3);
+    payload.appendExternal("12345678", 8);
     TcpTransport::sendMessage(fd, 111, &payload, -1);
 
     Transport::ServerRpc* serverRpc = serviceManager->waitForRpc(1.0);
@@ -437,10 +437,33 @@ TEST_F(TcpTransportTest, sendMessage_multipleChunks) {
     close(fd);
 }
 
+TEST_F(TcpTransportTest, sendMessage_tooManyChunksForOneMessage) {
+    int fd = connectToServer(locator);
+    Buffer payload;
+    for (int i = 0; i < 60; i++) {
+        payload.appendExternal("abcdefghijklmnopqrstuvwxyz" + i/10, 1);
+        payload.appendExternal("0123456789" + i%10, 1);
+    }
+    int bytesLeft = TcpTransport::sendMessage(fd, 111, &payload, -1);
+    EXPECT_EQ(21, bytesLeft);
+    bytesLeft = TcpTransport::sendMessage(fd, 111, &payload, bytesLeft);
+    EXPECT_EQ(0, bytesLeft);
+
+    Transport::ServerRpc* serverRpc = serviceManager->waitForRpc(1.0);
+    EXPECT_TRUE(serverRpc != NULL);
+    EXPECT_EQ("a0a1a2a3a4a5a6a7a8a9b0b1b2b3b4b5b6b7b8b9c0c1c2c3c4c5c6c7c8c9"
+            "d0d1d2d3d4d5d6d7d8d9e0e1e2e3e4e5e6e7e8e9f0f1f2f3f4f5f6f7f8f9",
+            TestUtil::toString(&serverRpc->requestPayload));
+    server.serverRpcPool.destroy(
+        static_cast<TcpTransport::TcpServerRpc*>(serverRpc));
+
+    close(fd);
+}
+
 TEST_F(TcpTransportTest, sendMessage_errorOnSend) {
     int fd = connectToServer(locator);
     Buffer payload;
-    payload.append("test message", 5);
+    payload.appendExternal("test message", 5);
 
     sys->sendmsgErrno = EPERM;
     string message("no exception");
@@ -488,7 +511,7 @@ TEST_F(TcpTransportTest, sendMessage_brokenPipe) {
     string message("no exception");
     try {
         Buffer request;
-        request.append("message chunk", 13);
+        request.appendExternal("message chunk", 13);
         TcpTransport::TcpSession* rawSession =
                 reinterpret_cast<TcpTransport::TcpSession*>(session.get());
         for (int i = 0; i < 1000; i++) {
@@ -1218,6 +1241,9 @@ TEST_F(TcpTransportTest, sessionAlarm) {
     // things get cleaned up well enough that a timeout doesn't occur.
     MockWrapper rpc1("request1");
     session->sendRequest(&rpc1.request, &rpc1.response, &rpc1);
+    // We do not want the session alarm timer firing unless we fire it
+    // explicitly.
+    context.sessionAlarmTimer->stop();
     Transport::ServerRpc* serverRpc = serviceManager->waitForRpc(1.0);
     serverRpc->replyPayload.fillFromString("response1");
     serverRpc->sendReply();

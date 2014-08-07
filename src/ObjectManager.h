@@ -49,72 +49,49 @@ namespace RAMCloud {
 class ObjectManager : public LogEntryHandlers {
   public:
 
-    ObjectManager(Context* context,
-                  ServerId* serverId,
-                  const ServerConfig* config,
-                  TabletManager* tabletManager,
-                  MasterTableMetadata* masterTableMetadata);
+    ObjectManager(Context* context, ServerId* serverId,
+                const ServerConfig* config,
+                TabletManager* tabletManager,
+                MasterTableMetadata* masterTableMetadata);
     virtual ~ObjectManager();
     void initOnceEnlisted();
 
     void indexedRead(const uint64_t tableId, uint32_t reqNumHashes,
-                     Buffer* pKHashes, uint32_t initialPKHashesOffset,
-                     IndexKeyRange* keyRange, uint32_t maxLength,
-                     Buffer* response, uint32_t* respNumHashes,
-                     uint32_t* numObjects);
-    Status readObject(Key& key,
-                      Buffer* outBuffer,
-                      RejectRules* rejectRules,
-                      uint64_t* outVersion,
-                      bool valueOnly = false);
-    Status writeObject(Object& newObject,
-                       RejectRules* rejectRules,
-                       uint64_t* outVersion,
-                       Buffer* removedObjBuffer = NULL);
-    Status removeObject(Key& key,
-                        RejectRules* rejectRules,
-                        uint64_t* outVersion,
-                        Buffer* removedObjBuffer = NULL);
-    void syncChanges();
+                Buffer* pKHashes, uint32_t initialPKHashesOffset,
+                IndexKey::IndexKeyRange* keyRange, uint32_t maxLength,
+                Buffer* response, uint32_t* respNumHashes,
+                uint32_t* numObjects);
     void prefetchHashTableBucket(SegmentIterator* it);
-    void replaySegment(SideLog* sideLog, SegmentIterator& it,
-                       std::unordered_map<uint64_t, uint64_t>&
-                           highestBTreeIdMap);
-    void replaySegment(SideLog* sideLog, SegmentIterator& it);
+    Status readObject(Key& key, Buffer* outBuffer,
+                RejectRules* rejectRules, uint64_t* outVersion,
+                bool valueOnly = false);
+    Status removeObject(Key& key, RejectRules* rejectRules,
+                uint64_t* outVersion, Buffer* removedObjBuffer = NULL);
     void removeOrphanedObjects();
-
-    /// The following three methods are used when multiple log entries
-    /// need to be committed to the log atomically
-
-    /**
-     * This method is currently used by the Btree module to prepare a buffer
-     * for the log. The idea is that eventually, each of the log entries in
-     * the buffer can be flushed atomically by the log.
-     * It is general enough to be used by any other module
-     */
-    Status prepareForLog(Object& newObject, Buffer *logBuffer,
-                         uint32_t* offset, bool *tombstoneAdded);
+    void replaySegment(SideLog* sideLog, SegmentIterator& it,
+                std::unordered_map<uint64_t, uint64_t>& highestBTreeIdMap);
+    void replaySegment(SideLog* sideLog, SegmentIterator& it);
+    void syncChanges();
+    Status writeObject(Object& newObject, RejectRules* rejectRules,
+                uint64_t* outVersion, Buffer* removedObjBuffer = NULL);
 
     /**
-     * Write a tombstone including the corresponding log entry header
-     * into a buffer based on the primary key of the object
+     * The following three methods are used when multiple log entries
+     * need to be committed to the log atomically.
      */
-    Status writeTombstone(Key& key, Buffer *logBuffer);
 
-    /**
-     * Flushes all log entries from a buffer to the log atomically.
-     */
     bool flushEntriesToLog(Buffer *logBuffer, uint32_t& numEntries);
+    Status prepareForLog(Object& newObject, Buffer *logBuffer,
+                uint32_t* offset, bool *tombstoneAdded);
+    Status writeTombstone(Key& key, Buffer *logBuffer);
 
     /**
      * The following two methods are used by the log cleaner. They aren't
      * intended to be called from any other modules.
      */
     uint32_t getTimestamp(LogEntryType type, Buffer& buffer);
-    void relocate(LogEntryType type,
-                  Buffer& oldBuffer,
-                  Log::Reference oldReference,
-                  LogEntryRelocator& relocator);
+    void relocate(LogEntryType type, Buffer& oldBuffer,
+                Log::Reference oldReference, LogEntryRelocator& relocator);
 
     /**
      * The following methods exist because our current abstraction doesn't quite
@@ -155,8 +132,8 @@ class ObjectManager : public LogEntryHandlers {
         {
             uint64_t unused;
             uint64_t bucket = HashTable::findBucketIndex(
-                                        objectManager.objectMap.getNumBuckets(),
-                                        key.getHash(), &unused);
+                        objectManager.objectMap.getNumBuckets(),
+                        key.getHash(), &unused);
             takeBucketLock(objectManager, bucket);
         }
 
@@ -209,6 +186,20 @@ class ObjectManager : public LogEntryHandlers {
     };
 
     /**
+     * Struct used to pass parameters into the removeIfOrphanedObject and
+     * removeIfTombstone methods through the generic HashTable::forEachInBucket
+     * method.
+     */
+    struct CleanupParameters {
+        /// Pointer to the ObjectManager class owning the hash table.
+        ObjectManager* objectManager;
+
+        /// Pointer to the locking object that is keeping the hash table bucket
+        /// currently begin iterated thread-safe.
+        ObjectManager::HashTableBucketLock* lock;
+    };
+
+    /**
      * A Dispatch::Poller that lazily removes tombstones that were added to the
      * objectMap during calls to replaySegment(). ObjectManager instantiates one
      * on creation that runs automatically as needed.
@@ -216,7 +207,7 @@ class ObjectManager : public LogEntryHandlers {
     class RemoveTombstonePoller : public Dispatch::Poller {
       public:
         RemoveTombstonePoller(ObjectManager* objectManager,
-                              HashTable* objectMap);
+                        HashTable* objectMap);
         virtual void poll();
 
       PRIVATE:
@@ -246,32 +237,25 @@ class ObjectManager : public LogEntryHandlers {
         DISALLOW_COPY_AND_ASSIGN(RemoveTombstonePoller);
     };
 
-    /**
-     * Struct used to pass parameters into the removeIfOrphanedObject and
-     * removeIfTombstone methods through the generic HashTable::forEachInBucket
-     * method.
-     */
-    struct CleanupParameters {
-        /// Pointer to the ObjectManager class owning the hash table.
-        ObjectManager* objectManager;
-
-        /// Pointer to the locking object that is keeping the hash table bucket
-        /// currently begin iterated thread-safe.
-        ObjectManager::HashTableBucketLock* lock;
-    };
-
-    bool lookup(HashTableBucketLock& lock,
-                Key& key,
-                LogEntryType& outType,
-                Buffer& buffer,
+    static string dumpSegment(Segment* segment);
+    uint32_t getObjectTimestamp(Buffer& buffer);
+    uint32_t getTombstoneTimestamp(Buffer& buffer);
+    bool lookup(HashTableBucketLock& lock, Key& key,
+                LogEntryType& outType, Buffer& buffer,
                 uint64_t* outVersion = NULL,
                 Log::Reference* outReference = NULL,
                 HashTable::Candidates* outCandidates = NULL);
+    friend void recoveryCleanup(uint64_t maybeTomb, void *cookie);
     bool remove(HashTableBucketLock& lock, Key& key);
-    bool replace(HashTableBucketLock& lock, Key& key, Log::Reference reference);
     static void removeIfOrphanedObject(uint64_t reference, void *cookie);
     static void removeIfTombstone(uint64_t maybeTomb, void *cookie);
-    static string dumpSegment(Segment* segment);
+    void removeTombstones();
+    Status rejectOperation(const RejectRules* rejectRules, uint64_t version)
+                __attribute__((warn_unused_result));
+    void relocateObject(Buffer& oldBuffer, Log::Reference oldReference,
+                LogEntryRelocator& relocator);
+    void relocateTombstone(Buffer& oldBuffer, LogEntryRelocator& relocator);
+    bool replace(HashTableBucketLock& lock, Key& key, Log::Reference reference);
 
     /**
      * Shared RAMCloud information.
@@ -333,8 +317,6 @@ class ObjectManager : public LogEntryHandlers {
      */
     HashTable objectMap;
 
-  PRIVATE:
-
     /**
      * Used to identify the first write request, so that we can initialize
      * connections to all backups at that time (this is a temporary kludge
@@ -367,21 +349,6 @@ class ObjectManager : public LogEntryHandlers {
      * constructor).
      */
     Tub<RemoveTombstonePoller> tombstoneRemover;
-
-    friend void recoveryCleanup(uint64_t maybeTomb, void *cookie);
-    friend void removeObjectIfFromUnknownTablet(uint64_t reference,
-                                                void *cookie);
-
-    uint32_t getObjectTimestamp(Buffer& buffer);
-    uint32_t getTombstoneTimestamp(Buffer& buffer);
-    Status rejectOperation(const RejectRules* rejectRules, uint64_t version)
-        __attribute__((warn_unused_result));
-    void relocateObject(Buffer& oldBuffer,
-                        Log::Reference oldReference,
-                        LogEntryRelocator& relocator);
-    void relocateTombstone(Buffer& oldBuffer,
-                           LogEntryRelocator& relocator);
-    void removeTombstones();
 
     friend class CleanerCompactionBenchmark;
     friend class ObjectManagerBenchmark;

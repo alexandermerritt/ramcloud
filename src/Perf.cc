@@ -52,7 +52,6 @@
 #include "SpinLock.h"
 #include "ClientException.h"
 #include "PerfHelper.h"
-#include "KeyUtil.h"
 
 using namespace RAMCloud;
 
@@ -185,7 +184,7 @@ double bufferBasic()
     uint64_t start = Cycles::rdtsc();
     for (int i = 0; i < count; i++) {
         Buffer b;
-        b.append("abcdefg", 5);
+        b.appendExternal("abcdefg", 5);
     }
     uint64_t stop = Cycles::rdtsc();
     return Cycles::toSeconds(stop - start)/count;
@@ -228,8 +227,8 @@ double bufferCopy()
 {
     int count = 1000000;
     Buffer b;
-    b.append("abcde", 5);
-    b.append("01234", 5);
+    b.appendExternal("abcde", 5);
+    b.appendExternal("01234", 5);
     char copy[10];
     uint64_t start = Cycles::rdtsc();
     for (int i = 0; i < count; i++) {
@@ -288,7 +287,7 @@ double bufferIterator()
     Buffer b;
     const char* p = "abcdefghijklmnopqrstuvwxyz";
     for (int i = 0; i < 5; i++) {
-        b.append(p+i, 5);
+        b.appendExternal(p+i, 5);
     }
     int count = 100000;
     int sum = 0;

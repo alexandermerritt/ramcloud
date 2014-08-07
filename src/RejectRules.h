@@ -16,6 +16,8 @@
 #ifndef RAMCLOUD_REJECTRULES_H
 #define RAMCLOUD_REJECTRULES_H
 
+#include <inttypes.h>
+
 #ifdef __cplusplus
 namespace RAMCloud {
 #endif
@@ -42,7 +44,7 @@ struct RejectRules {
     uint8_t   exists;
     uint8_t   versionLeGiven;
     uint8_t   versionNeGiven;
-};
+} __attribute__((packed));
 
 #ifdef __cplusplus
 } // namespace RAMCloud

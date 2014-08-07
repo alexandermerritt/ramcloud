@@ -14,6 +14,7 @@
  */
 
 #include "Cycles.h"
+#include "IndexKey.h"
 #include "ObjectFinder.h"
 #include "ShortMacros.h"
 #include "Key.h"
@@ -244,7 +245,7 @@ ObjectFinder::lookup(uint64_t tableId, KeyHash keyHash)
  * \param tableId
  *      The table containing the desired object.
  * \param indexId
- *      Id of the index for which keys are to be compared.
+ *      Id of a particular index in tableId.
  * \param key
  *      Blob corresponding to the key.
  * \param keyLength
@@ -276,7 +277,7 @@ ObjectFinder::lookup(uint64_t tableId, uint8_t indexId,
  * \param tableId
  *      The table containing the desired object.
  * \param indexId
- *      Id of the index for which keys are to be compared.
+ *      Id of a particular index in tableId.
  * \param key
  *      Blob corresponding to the key.
  * \param keyLength
@@ -299,17 +300,17 @@ ObjectFinder::lookupIndexlet(uint64_t tableId, uint8_t indexId,
         std::pair <IndexletIter, IndexletIter> range;
         range = tableIndexMap.equal_range(indexKey);
 
-        for (iter = range.first; iter != range.second; iter++){
+        for (iter = range.first; iter != range.second; iter++) {
 
             Indexlet* indexlet = &iter->second;
             if (indexlet->firstKey != NULL) {
-                if (keyCompare(key, keyLength,
+                if (IndexKey::keyCompare(key, keyLength,
                            indexlet->firstKey, indexlet->firstKeyLength) < 0) {
                     continue;
                 }
             }
             if (indexlet->firstNotOwnedKey != NULL) {
-                if (keyCompare(key, keyLength,
+                if (IndexKey::keyCompare(key, keyLength,
                                indexlet->firstNotOwnedKey,
                                indexlet->firstNotOwnedKeyLength) >= 0) {
                     continue;
@@ -318,7 +319,7 @@ ObjectFinder::lookupIndexlet(uint64_t tableId, uint8_t indexId,
             return indexlet;
         }
 
-        if (count == 0){
+        if (count == 0) {
             flush(tableId);
             tableConfigFetcher->getTableConfig(tableId, &tableMap,
                                                             &tableIndexMap);
@@ -413,7 +414,7 @@ ObjectFinder::flushSession(uint64_t tableId, KeyHash keyHash)
  * \param tableId
  *      The table containing the desired object.
  * \param indexId
- *      Id of the index for which keys are to be compared.
+ *      Id of a particular index in tableId.
  * \param key
  *      Blob corresponding to the key.
  * \param keyLength
@@ -429,19 +430,6 @@ ObjectFinder::flushSession(uint64_t tableId, uint8_t indexId,
         context->transportManager->flushSession(
                         indexlet->serviceLocator);
         indexlet->session = NULL;
-    }
-}
-
-int
-ObjectFinder::keyCompare(const void* key1, uint16_t keyLength1,
-                            const void* key2, uint16_t keyLength2)
-{
-    int keyCmp = bcmp(key1, key2, std::min(keyLength1, keyLength2));
-
-    if (keyCmp != 0) {
-        return keyCmp;
-    } else {
-        return keyLength1 - keyLength2;
     }
 }
 

@@ -3120,7 +3120,7 @@ private:
         for (unsigned short slot = 0; slot < innernode->slotuse; ++slot)
         {
             RAMCLOUD_LOG(DEBUG,
-                         " ( %d ) %s ", innernode->childid[slot],
+                         " ( %lu ) %s ", innernode->childid[slot],
                          std::string((const char *)&innernode->slotkey[slot], 40).c_str());
         }
         RAMCLOUD_LOG(DEBUG, "( %lu )", innernode->childid[innernode->slotuse]);

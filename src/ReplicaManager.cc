@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2012 Stanford University
+/* Copyright (c) 2009-2014 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -56,6 +56,7 @@ ReplicaManager::ReplicaManager(Context* context,
     , replicatedSegmentList()
     , taskQueue()
     , writeRpcsInFlight(0)
+    , freeRpcsInFlight(0)
     , replicationEpoch()
     , failureMonitor(context, this)
     , replicationCounter()
@@ -415,9 +416,10 @@ ReplicaManager::allocateSegment(const Lock& lock,
     auto* p = replicatedSegmentPool.malloc();
     if (p == NULL)
         DIE("Out of memory");
-    auto* replicatedSegment =
+    ReplicatedSegment* replicatedSegment =
         new(p) ReplicatedSegment(context, taskQueue, *backupSelector, *this,
-                                 writeRpcsInFlight, *replicationEpoch,
+                                 writeRpcsInFlight, freeRpcsInFlight,
+                                 *replicationEpoch,
                                  dataMutex, segmentId, segment,
                                  isLogHead, *masterId, numReplicas,
                                  &replicationCounter);

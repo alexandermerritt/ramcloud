@@ -29,7 +29,7 @@ class MasterService;
 
 /**
  * IndexRpcWrapper manages the client side of RPCs that must be sent to
- * the server that stores the first index key of a key range.
+ * the server that stores a particular key for a particular secondary index.
  * If the server becomes unavailable or if it doesn't actually store the
  * desired key, then this class will retry the RPC with a different server
  * until it eventually succeeds.
@@ -60,6 +60,7 @@ class IndexRpcWrapper : public RpcWrapper {
   PROTECTED:
     virtual bool checkStatus();
     virtual bool handleTransportError();
+    virtual void indexNotFound();
     virtual void send();
 
     /// Overall information about the calling process.
@@ -75,8 +76,6 @@ class IndexRpcWrapper : public RpcWrapper {
     uint8_t indexId;
     const void* key;
     uint16_t keyLength;
-
-    bool foundIndex;
 
     DISALLOW_COPY_AND_ASSIGN(IndexRpcWrapper);
 };

@@ -131,8 +131,6 @@ class InfRcTransport : public Transport {
             void sendOrQueue();
 
         PRIVATE:
-            void sendZeroCopy(Buffer* buffer);
-
             InfRcTransport*     transport;
             InfRcSession*       session;
 
@@ -145,6 +143,13 @@ class InfRcTransport : public Transport {
 
             /// Uniquely identifies the RPC.
             uint64_t            nonce;
+
+            /// If the RPC couldn't immediately be sent because there
+            /// weren't enough client receive buffers available, this
+            /// records the start of the waiting time, so we can print
+            /// a message if the wait is long.
+            uint64_t waitStart;
+
             enum {
                 PENDING,
                 REQUEST_SENT,
@@ -283,6 +288,7 @@ class InfRcTransport : public Transport {
     };
 
     // misc helper functions
+    void sendZeroCopy(Buffer* message, QueuePair* qp);
     void setNonBlocking(int fd);
 
     // Extend Infiniband::postSrqReceive by issuing queued up transmissions

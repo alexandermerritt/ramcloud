@@ -109,17 +109,18 @@ enum Opcode {
     VERIFY_MEMBERSHIP         = 55,
     GET_RUNTIME_OPTION        = 56,
     SERVER_CONTROL            = 57,
-    GET_SERVER_ID             = 58,
-    READ_KEYS_AND_VALUE       = 59,
-    LOOKUP_INDEX_KEYS         = 60,
-    INDEXED_READ              = 61,
-    INSERT_INDEX_ENTRY        = 62,
-    REMOVE_INDEX_ENTRY        = 63,
-    CREATE_INDEX              = 64,
-    DROP_INDEX                = 65,
-    DROP_INDEXLET_OWNERSHIP   = 66,
-    TAKE_INDEXLET_OWNERSHIP   = 67,
-    ILLEGAL_RPC_TYPE          = 68,  // 1 + the highest legitimate Opcode
+    SERVER_CONTROL_ALL        = 58,
+    GET_SERVER_ID             = 59,
+    READ_KEYS_AND_VALUE       = 60,
+    LOOKUP_INDEX_KEYS         = 61,
+    INDEXED_READ              = 62,
+    INSERT_INDEX_ENTRY        = 63,
+    REMOVE_INDEX_ENTRY        = 64,
+    CREATE_INDEX              = 65,
+    DROP_INDEX                = 66,
+    DROP_INDEXLET_OWNERSHIP   = 67,
+    TAKE_INDEXLET_OWNERSHIP   = 68,
+    ILLEGAL_RPC_TYPE          = 69, // 1 + the highest legitimate Opcode
 };
 
 /**
@@ -133,6 +134,8 @@ enum ControlOp {
     DUMP_DISPATCH_PROFILE       = 1002,
     GET_TIME_TRACE              = 1003,
     LOG_TIME_TRACE              = 1004,
+    GET_CACHE_TRACE             = 1005,
+    LOG_CACHE_TRACE             = 1006,
 };
 
 /**
@@ -466,10 +469,11 @@ struct CreateIndex {
     static const ServiceType service = COORDINATOR_SERVICE;
     struct Request {
         RequestCommon common;
-        uint64_t tableId;
-        uint8_t indexType;
-        uint8_t indexId;
-        uint8_t numIndexlets;
+        uint64_t tableId;       // Id of table to which the index belongs.
+        uint8_t indexType;      // Type of index.
+        uint8_t indexId;        // Id of secondary keys in the index.
+        uint8_t numIndexlets;   // Number of indexlets to partition the index
+                                // key space.
     } __attribute__((packed));
     struct Response {
         ResponseCommon common;
@@ -481,8 +485,8 @@ struct DropIndex {
     static const ServiceType service = COORDINATOR_SERVICE;
     struct Request {
         RequestCommon common;
-        uint64_t tableId;
-        uint8_t indexId;
+        uint64_t tableId;       // Id of table to which the index belongs.
+        uint8_t indexId;        // Id of secondary keys in the index.
     } __attribute__((packed));
     struct Response {
         ResponseCommon common;
@@ -494,11 +498,15 @@ struct DropIndexletOwnership {
     static const ServiceType service = MASTER_SERVICE;
     struct Request {
         RequestCommonWithId common;
-        uint64_t tableId;
-        uint8_t indexId;
-        uint16_t firstKeyLength;
-        uint16_t firstNotOwnedKeyLength;
-        // In buffer: The actual first key and last key go here.
+        uint64_t tableId;                   // Id of table to which the index
+                                            // belongs.
+        uint8_t indexId;                    // Id of secondary keys in index.
+        uint16_t firstKeyLength;            // Length of firstKey in bytes.
+        uint16_t firstNotOwnedKeyLength;    // Length of firstNotOwnedKey in
+                                            // bytes.
+        // In buffer: The actual bytes for firstKey and firstNotOwnedKey
+        // go here. [firstKey, firstNotOwnedKey) defines the span of the
+        // indexlet.
     } __attribute__((packed));
     struct Response {
         ResponseCommon common;
@@ -821,10 +829,13 @@ struct InsertIndexEntry {
     static const ServiceType service = MASTER_SERVICE;
     struct Request {
         RequestCommon common;
-        uint64_t tableId;
-        uint8_t indexId;
-        uint16_t indexKeyLength;
-        uint64_t primaryKeyHash;
+        uint64_t tableId;           // Id of the table containing the object
+                                    // for which index entry is being inserted.
+        uint8_t indexId;            // Id of the index for which the entry
+                                    // is being inserted.
+        uint16_t indexKeyLength;    // Length of index key in bytes.
+        uint64_t primaryKeyHash;    // Hash of the primary key of the object for
+                                    // for which index entry is being inserted.
         // In buffer: Actual bytes of the index key goes here.
     } __attribute__((packed));
     struct Response {
@@ -873,12 +884,14 @@ struct LookupIndexKeys {
 
     struct Request {
         RequestCommon common;
-        uint64_t tableId;       // Id of the table containing the objects.
-        uint8_t indexId;        // Id of index in which lookup is to be done.
+        uint64_t tableId;               // Id of the table for the lookup.
+        uint8_t indexId;                // Id of the index for the lookup.
+        uint16_t firstKeyLength;        // Length of first key in bytes.
         uint64_t firstAllowedKeyHash;   // Smallest primary key hash value
                                         // allowed for firstKey.
-        uint16_t firstKeyLength;        // Length of first key in bytes.
         uint16_t lastKeyLength;         // Length of last key in bytes.
+        uint32_t maxNumHashes;          // Max number of primary key hashes
+                                        // to be returned.
         // In buffer: The actual first key and last key go here.
     } __attribute__((packed));
 
@@ -888,9 +901,9 @@ struct LookupIndexKeys {
         uint16_t nextKeyLength; // Length of next key to fetch.
         uint64_t nextKeyHash;   // Minimum allowed hash corresponding to
                                 // next key to be fetched.
+        // In buffer: Key hashes of primary keys for matching objects go here.
         // In buffer: Actual bytes for the next key for which
         // the client should send another lookup request (if any) goes here.
-        // In buffer: Key hashes of primary keys for matching objects go here.
     } __attribute__((packed));
 };
 
@@ -1250,20 +1263,74 @@ struct RemoveIndexEntry {
 struct ServerControl {
     static const Opcode opcode = Opcode::SERVER_CONTROL;
     static const ServiceType service = PING_SERVICE;
+
+    /// Distinguishes between the ObjectServerControl, IndexServerControl,
+    /// and ServerControl types.
+    /// Note: Make sure INVALID is always last.
+    enum ServerControlType {
+        OBJECT,                     // ObjectServerControl type.
+        INDEX,                      // IndexServerControl type.
+        SERVER_ID,                  // ServerControl type.
+        INVALID                     // Invalid type used for testing.
+    };
+
+    struct Request {
+        RequestCommon common;
+        ServerControlType type;     // Defines which arguments the server checks
+                                    // before proceeding.
+        ControlOp controlOp;        // The control operation to be initiated
+                                    // in a server.
+        uint64_t tableId;           // TableId of owned target object/indexlet.
+        uint8_t indexId;            // IndexId of owned target indexlet.
+        uint16_t keyLength;         // Length of key/secondary key of the
+                                    // owned target object/indexlet.
+        uint32_t inputLength;       // Length of the input data for the
+                                    // control operation, in bytes.
+        // Data follows immediately after this header in the following order:
+        // key      (keyLength bytes of key data)
+        // input    (inputLength bytes of input data)
+    } __attribute__((packed));
+    struct Response {
+        ResponseCommon common;
+        uint64_t serverId;          // ServerId of the responding server.
+        uint32_t outputLength;      // Length of the output data returning
+                                    // from the server, in bytes. The actual
+                                    // data follow immediately after the header.
+    } __attribute__((packed));
+};
+
+struct ServerControlAll {
+    static const Opcode opcode = Opcode::SERVER_CONTROL_ALL;
+    static const ServiceType service = COORDINATOR_SERVICE;
+
     struct Request {
         RequestCommon common;
         ControlOp controlOp;        // The control operation to be initiated
                                     // in a server.
         uint32_t inputLength;       // Length of the input data for the
                                     // control operation, in bytes.
-                                    // The actual data follow immediately
-                                    // after this header.
+        // In buffer: Input Data (if any).
     } __attribute__((packed));
     struct Response {
         ResponseCommon common;
-        uint32_t outputLength;      // Length of the output data returning
-                                    // from the server, in bytes. The actual
-                                    // data follow immediately after the header.
+        uint32_t serverCount;       // Number of servers that executed and
+                                    // responded to the control rpc.
+        uint32_t respCount;         // Number of ServerControl responses
+                                    // included in this response. All responses
+                                    // and headers will not in total exceed the
+                                    // MAX_RPC_LEN; responses may be dropped to
+                                    // meet this limit.  If responses are
+                                    // dropped, the respCount will be less than
+                                    // the serverCount.
+        uint32_t totalRespLength;   // Length of all appended ServerControl
+                                    // responses including their headers.
+                                    // 0 or more ServerControl response entries
+                                    // are appended back to back immediately
+                                    // following the header.  Entries consist of
+                                    // a ServerControl::Response header followed
+                                    // by the ServerConrol::Response data; an
+                                    // entry is exactly the contents of a
+                                    // ServerControlRpc's replyPayload.
     } __attribute__((packed));
 };
 
@@ -1356,12 +1423,17 @@ struct TakeIndexletOwnership {
     static const ServiceType service = MASTER_SERVICE;
     struct Request {
         RequestCommonWithId common;
-        uint64_t tableId;
-        uint8_t indexId;
-        uint64_t indexletTableId;
-        uint16_t firstKeyLength;
-        uint16_t firstNotOwnedKeyLength;
-        // In buffer: The actual first key and last key go here.
+        uint64_t tableId;                   // Id of table to which the index
+                                            // belongs.
+        uint8_t indexId;                    // Type of index.
+        uint64_t indexletTableId;           // Id of the table that will hold
+                                            // objects for this indexlet.
+        uint16_t firstKeyLength;            // Length of fistKey in bytes.
+        uint16_t firstNotOwnedKeyLength;    // Length of firstNotOwnedKey in
+                                            // bytes.
+        // In buffer: The actual bytes for firstKey and firstNotOwnedKey
+        // go here. [firstKey, firstNotOwnedKey) defines the span of the
+        // indexlet.
     } __attribute__((packed));
     struct Response {
         ResponseCommon common;

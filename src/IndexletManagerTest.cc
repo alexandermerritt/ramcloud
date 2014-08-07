@@ -103,8 +103,8 @@ TEST_F(IndexletManagerTest, addIndexlet) {
     EXPECT_FALSE(im.addIndexlet(0, 0, indexletTableId + 4, key1.c_str(),
         (uint16_t)key1.length(), key3.c_str(), (uint16_t)key3.length()));
 
-    SpinLock indexletMapMutex;
-    IndexletManager::Lock fakeGuard(indexletMapMutex);
+    SpinLock mutex;
+    IndexletManager::Lock fakeGuard(mutex);
     IndexletManager::Indexlet* indexlet = &im.lookupIndexlet(0, 0, key2.c_str(),
         (uint16_t)key2.length(), fakeGuard)->second;
     string firstKey = StringUtil::binaryToString(
@@ -125,7 +125,7 @@ TEST_F(IndexletManagerTest, addIndexlet_ProtoBuf) {
     ProtoBuf::Indexlets::Indexlet indexlet;
     indexlet.set_table_id(0);
     indexlet.set_index_id(0);
-    indexlet.set_indexlettable_id(indexletTableId);
+    indexlet.set_indexlet_table_id(indexletTableId);
     indexlet.set_start_key(key2);
     indexlet.set_end_key(key4);
 
@@ -136,7 +136,7 @@ TEST_F(IndexletManagerTest, addIndexlet_ProtoBuf) {
     // of the constructor of IndexletManagerTest
     tabletManager.addTablet(indexletTableId + 1, 0, ~0UL,
                             TabletManager::NORMAL);
-    indexlet.set_indexlettable_id(indexletTableId + 1);
+    indexlet.set_indexlet_table_id(indexletTableId + 1);
     indexlet.set_start_key(key2);
     indexlet.set_end_key(key4);
     EXPECT_FALSE(im.addIndexlet(indexlet));
@@ -147,7 +147,7 @@ TEST_F(IndexletManagerTest, addIndexlet_ProtoBuf) {
     // of the constructor of IndexletManagerTest
     tabletManager.addTablet(indexletTableId + 2, 0, ~0UL,
                             TabletManager::NORMAL);
-    indexlet.set_indexlettable_id(indexletTableId + 2);
+    indexlet.set_indexlet_table_id(indexletTableId + 2);
     indexlet.set_start_key(key1);
     indexlet.set_end_key(key2);
     EXPECT_TRUE(im.addIndexlet(indexlet));
@@ -158,7 +158,7 @@ TEST_F(IndexletManagerTest, addIndexlet_ProtoBuf) {
     // of the constructor of IndexletManagerTest
     tabletManager.addTablet(indexletTableId + 3, 0, ~0UL,
                             TabletManager::NORMAL);
-    indexlet.set_indexlettable_id(indexletTableId + 3);
+    indexlet.set_indexlet_table_id(indexletTableId + 3);
     indexlet.set_start_key(key4);
     indexlet.set_end_key(key5);
     EXPECT_TRUE(im.addIndexlet(indexlet));
@@ -169,13 +169,13 @@ TEST_F(IndexletManagerTest, addIndexlet_ProtoBuf) {
     // of the constructor of IndexletManagerTest
     tabletManager.addTablet(indexletTableId + 4, 0, ~0UL,
                             TabletManager::NORMAL);
-    indexlet.set_indexlettable_id(indexletTableId + 4);
+    indexlet.set_indexlet_table_id(indexletTableId + 4);
     indexlet.set_start_key(key1);
     indexlet.set_end_key(key3);
     EXPECT_FALSE(im.addIndexlet(indexlet));
 
-    SpinLock indexletMapMutex;
-    IndexletManager::Lock fakeGuard(indexletMapMutex);
+    SpinLock mutex;
+    IndexletManager::Lock fakeGuard(mutex);
     IndexletManager::Indexlet* ind = &im.lookupIndexlet(0, 0, key2.c_str(),
         (uint16_t)key2.length(), fakeGuard)->second;
     string firstKey = StringUtil::binaryToString(
@@ -185,6 +185,39 @@ TEST_F(IndexletManagerTest, addIndexlet_ProtoBuf) {
 
     EXPECT_EQ(0, firstKey.compare("c"));
     EXPECT_EQ(0, firstNotOwnedKey.compare("k"));
+}
+
+TEST_F(IndexletManagerTest, hasIndexlet) {
+    string key1 = "a";
+    string key2 = "c";
+    string key3 = "f";
+    string key4 = "k";
+    string key5 = "u";
+
+    // check if indexlet exist corresponding to c
+    EXPECT_FALSE(im.hasIndexlet(0, 0, key2.c_str(), (uint16_t)key2.length()));
+
+    // add indexlet exist corresponding to [c, k)
+    im.addIndexlet(0, 0, indexletTableId, key2.c_str(),
+        (uint16_t)key2.length(), key4.c_str(), (uint16_t)key4.length());
+
+    // check if indexlet exist corresponding to c
+    EXPECT_TRUE(im.hasIndexlet(0, 0, key2.c_str(), (uint16_t)key2.length()));
+
+    // different table id
+    EXPECT_FALSE(im.hasIndexlet(1, 0, key2.c_str(), (uint16_t)key2.length()));
+
+    // different index id
+    EXPECT_FALSE(im.hasIndexlet(0, 1, key2.c_str(), (uint16_t)key2.length()));
+
+    // key is within the range of indexlet
+    EXPECT_TRUE(im.hasIndexlet(0, 0, key3.c_str(), (uint16_t)key3.length()));
+
+    // key is before the range of indexlet
+    EXPECT_FALSE(im.hasIndexlet(0, 0, key1.c_str(), (uint16_t)key1.length()));
+
+    // key is after the range of indexlet
+    EXPECT_FALSE(im.hasIndexlet(0, 1, key2.c_str(), (uint16_t)key2.length()));
 }
 
 TEST_F(IndexletManagerTest, getIndexlet) {
@@ -791,71 +824,6 @@ TEST_F(IndexletManagerTest, removeEntry_keyNotFound) {
     im.insertEntry(0, 0, "earth", 5, 9876);
     removeStatus = im.removeEntry(0, 0, "air", 3, 5678);
     EXPECT_EQ(STATUS_OK, removeStatus);
-}
-
-TEST_F(IndexletManagerTest, isKeyInRange)
-{
-    // Construct Object obj.
-    uint64_t tableId = 1;
-    uint8_t numKeys = 3;
-
-    KeyInfo keyList[3];
-    keyList[0].keyLength = 8;
-    keyList[0].key = "objkey0";
-    keyList[1].keyLength = 8;
-    keyList[1].key = "objkey1";
-    keyList[2].keyLength = 8;
-    keyList[2].key = "objkey2";
-
-    const void* value = "objvalue";
-    uint32_t valueLength = 9;
-
-    Buffer keysAndValueBuffer;
-    Object::appendKeysAndValueToBuffer(tableId, numKeys, keyList,
-                                       value, valueLength, keysAndValueBuffer);
-
-    Object obj(tableId, 1, 0, keysAndValueBuffer);
-
-    // Note: If isKeyInRange() didn't use keyCompare() then we'd have to
-    // test many more cases here.
-
-    // Case0: firstKey > key < lastKey
-    IndexKeyRange testRange0 = {1, "objkey2", 8, "objkey2", 8};
-    bool isInRange0 = IndexletManager::isKeyInRange(&obj, &testRange0);
-    EXPECT_FALSE(isInRange0);
-
-    // Case1: firstKey < key > lastKey
-    IndexKeyRange testRange1 = {1, "objkey0", 8, "objkey0", 8};
-    bool isInRange1 = IndexletManager::isKeyInRange(&obj, &testRange1);
-    EXPECT_FALSE(isInRange1);
-
-    // Case2: firstKey > key > lastKey
-    IndexKeyRange testRange2 = {1, "objkey2", 8, "objkey0", 8};
-    bool isInRange2 = IndexletManager::isKeyInRange(&obj, &testRange2);
-    EXPECT_FALSE(isInRange2);
-
-    // Case3: firstKey < key < lastKey
-    IndexKeyRange testRange3 = {1, "objkey0", 8, "objkey2", 8};
-    bool isInRange3 = IndexletManager::isKeyInRange(&obj, &testRange3);
-    EXPECT_TRUE(isInRange3);
-
-    // Case4: firstKey = key = lastKey
-    IndexKeyRange testRange4 = {1, "objkey1", 8, "objkey1", 8};
-    bool isInRange4 = IndexletManager::isKeyInRange(&obj, &testRange4);
-    EXPECT_TRUE(isInRange4);
-}
-
-TEST_F(IndexletManagerTest, keyCompare)
-{
-    EXPECT_EQ(0, IndexletManager::keyCompare("abc", 3, "abc", 3));
-    EXPECT_GT(0, IndexletManager::keyCompare("abb", 3, "abc", 3));
-    EXPECT_LT(0, IndexletManager::keyCompare("abd", 3, "abc", 3));
-    EXPECT_GT(0, IndexletManager::keyCompare("ab", 2, "abc", 3));
-    EXPECT_LT(0, IndexletManager::keyCompare("abcd", 4, "abc", 3));
-    EXPECT_GT(0, IndexletManager::keyCompare("abbc", 4, "abc", 3));
-    EXPECT_LT(0, IndexletManager::keyCompare("ac", 2, "abc", 3));
-    EXPECT_GT(0, IndexletManager::keyCompare("", 0, "abc", 3));
-    EXPECT_LT(0, IndexletManager::keyCompare("abc", 3, "", 0));
 }
 
 }  // namespace RAMCloud

@@ -30,20 +30,18 @@
 namespace RAMCloud {
 
 /**
- * This class is on every index server.
- * 
- * It manages and stores the metadata regarding indexlets (index partitions)
- * stored on this server.
+ * This class manages and stores the metadata regarding indexlets
+ * (index partitions) stored on this server.
  * The coordinator invokes metadata-related functions to manage the metadata.
- * 
+ *
  * This class is also provides the interface for storing index entries on this
  * index server for each indexlet it owns, to the masters owning the
  * data objects corresponding to those index entries.
  * This class interfaces with ObjectManager and index tree code to manage
  * the index entries.
  *
- * Note: There is no seprate index service
- * Every server that has the master service also serves as an index server
+ * Note: There is no seprate index service.
+ * A server that has the master service can also serve as an index server
  * for some partition of some index (independent from tablet located on
  * that master).
  */
@@ -100,8 +98,8 @@ class IndexletManager {
       public:
         bool operator()(const KeyAndHash x, const KeyAndHash y) const
         {
-            int keyComparison = keyCompare(x.key, x.keyLength,
-                                           y.key, y.keyLength);
+            int keyComparison = IndexKey::keyCompare(x.key, x.keyLength,
+                                                     y.key, y.keyLength);
             if (keyComparison == 0) {
                 return (x.pKHash < y.pKHash);
             }
@@ -143,11 +141,11 @@ class IndexletManager {
             this->firstNotOwnedKey = NULL;
             this->firstNotOwnedKeyLength = indexlet.firstNotOwnedKeyLength;
 
-            if (firstKeyLength != 0){
+            if (firstKeyLength != 0) {
                 this->firstKey = malloc(firstKeyLength);
                 memcpy(this->firstKey, indexlet.firstKey, firstKeyLength);
             }
-            if (firstNotOwnedKeyLength != 0){
+            if (firstNotOwnedKeyLength != 0) {
                 this->firstNotOwnedKey = malloc(firstNotOwnedKeyLength);
                 memcpy(this->firstNotOwnedKey, indexlet.firstNotOwnedKey,
                        firstNotOwnedKeyLength);
@@ -179,6 +177,7 @@ class IndexletManager {
 
     explicit IndexletManager(Context* context, ObjectManager* objectManager);
 
+
     /////////////////////////// Meta-data related functions //////////////////
 
     bool addIndexlet(uint64_t tableId, uint8_t indexId,
@@ -192,6 +191,8 @@ class IndexletManager {
                 const void *firstKey, uint16_t firstKeyLength,
                 const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength);
     bool deleteIndexlet(ProtoBuf::Indexlets::Indexlet indexlet);
+    bool hasIndexlet(uint64_t tableId, uint8_t indexId,
+                const void *key, uint16_t keyLength);
     struct Indexlet* getIndexlet(uint64_t tableId, uint8_t indexId,
                 const void *firstKey, uint16_t firstKeyLength,
                 const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength);
@@ -213,12 +214,6 @@ class IndexletManager {
                 const void* key, KeyLength keyLength,
                 uint64_t pKHash);
 
-    //////////////// Static functions related to index keys ///////////////////
-
-    static bool isKeyInRange(Object* object, IndexKeyRange* keyRange);
-
-    static int keyCompare(const void* key1, uint16_t keyLength1,
-                const void* key2, uint16_t keyLength2);
 
   PROTECTED:
     // Note: I'm using unique_lock (instead of lock_guard) with mutex because
@@ -245,7 +240,7 @@ class IndexletManager {
 
     /// This unordered_multimap is used to store and access all indexlet data.
     typedef std::unordered_multimap<std::pair<uint64_t, uint8_t>,
-                                    Indexlet, tableKeyHash> IndexletMap;
+                Indexlet, tableKeyHash> IndexletMap;
 
     /// Indexlet map instance storing indexlet mapping for this index server.
     IndexletMap indexletMap;
@@ -253,13 +248,13 @@ class IndexletManager {
     /// Mutex to protect the indexletMap from concurrent access.
     /// A lock for this mutex MUST be held to read or modify any state in
     /// the indexletMap.
-    SpinLock indexletMapMutex;
+    SpinLock mutex;
 
     /// Object Manager to handle mapping of index as objects
     ObjectManager* objectManager;
 
     IndexletMap::iterator lookupIndexlet(uint64_t tableId, uint8_t indexId,
-                const void *key, uint16_t keyLength, Lock& indexletMapMutex);
+                const void *key, uint16_t keyLength, Lock& mutex);
 
     DISALLOW_COPY_AND_ASSIGN(IndexletManager);
 };

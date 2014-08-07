@@ -48,8 +48,7 @@ namespace po = boost::program_options;
 #include "RamCloud.h"
 #include "CycleCounter.h"
 #include "Cycles.h"
-#include "KeyUtil.h"
-#include "PerfCounter.h"
+#include "Util.h"
 
 using namespace RAMCloud;
 
@@ -122,9 +121,104 @@ enum Id {
 // by clientIndex.
 typedef std::vector<std::vector<double>> ClientMetrics;
 
+// Used to return results about the distribution of times for a
+// particular operation.
+struct TimeDist {
+    double min;                   // Fastest time seen, in seconds.
+    double p50;                   // Median time per operation, in seconds.
+    double p90;                   // 90th percentile time/op, in seconds.
+    double p99;                   // 99th percentile time/op, in seconds.
+    double p999;                  // 99.9th percentile time/op, in seconds.
+    double p9999;                 // 99.99th percentile time/op, in seconds,
+                                  // or 0 if no such measurement.
+    double p99999;                // 99.999th percentile time/op, in seconds,
+                                  // or 0 if no such measurement.
+    double bandwidth;             // Average throughput in bytes/sec., or 0
+                                  // if no such measurement.
+};
+
 //----------------------------------------------------------------------
 // Utility functions used by the test functions
 //----------------------------------------------------------------------
+
+/**
+ * Given a time value, return a string representation of the value
+ * with an appropriate scale factor.
+ *
+ * \param seconds
+ *      Time value, in seconds.
+ * \result
+ *      A string corresponding to the time value, such as "4.2ms".
+ *      Appropriate units will be chosen, ranging from nanoseconds to
+ *      seconds.
+ */
+string formatTime(double seconds)
+{
+    if (seconds < 1.0e-06) {
+        return format("%5.1f ns", 1e09*seconds);
+    } else if (seconds < 1.0e-03) {
+        return format("%5.1f us", 1e06*seconds);
+    } else if (seconds < 1.0) {
+        return format("%5.1f ms", 1e03*seconds);
+    } else {
+        return format("%5.1f s ", seconds);
+    }
+}
+
+/**
+ * Given an array of time values, sort it and return information
+ * about various percentiles.
+ *
+ * \param times
+ *      Interval lengths in Cycles::rdtsc units.
+ * \param[out] dist
+ *      The various percentile values in this structure will be
+ *      filled in with times in seconds.
+ */
+void getDist(std::vector<uint64_t>& times, TimeDist* dist)
+{
+    int count = downCast<int>(times.size());
+    std::sort(times.begin(), times.end());
+    TimeDist result;
+    dist->min = Cycles::toSeconds(times[0]);
+    int index = count/2;
+    if (index < count) {
+        dist->p50 = Cycles::toSeconds(times[index]);
+    } else {
+        dist->p50 = 0;
+    }
+    index = count - (count+5)/10;
+    if (index < count) {
+        dist->p90 = Cycles::toSeconds(times[index]);
+    } else {
+        dist->p90 = 0;
+    }
+    index = count - (count+50)/100;
+    if (index < count) {
+        dist->p99 = Cycles::toSeconds(times[index]);
+    } else {
+        dist->p99 = 0;
+    }
+    index = count - (count+500)/1000;
+    if (index < count) {
+        dist->p999 = Cycles::toSeconds(times[index]);
+    } else {
+        dist->p999 = 0;
+    }
+    index = count - (count+5000)/10000;
+    if (index < count) {
+        dist->p9999 = Cycles::toSeconds(times[index]);
+    } else {
+        dist->p9999 = 0;
+    }
+    index = count - (count+50000)/100000;
+    if (index < count) {
+        dist->p99999 = Cycles::toSeconds(times[index]);
+    } else {
+        result.p99999 = 0;
+    }
+
+}
 
 /**
  * Generate a random string.
@@ -362,13 +456,19 @@ timeLookupAndIndexedRead(uint64_t tableId, uint8_t indexId, Key& pk,
                          std::vector<double>& lookupTimes,
                          std::vector<double>& lookupReadTimes)
 {
+    // Hard-coding a number that we think is this is enough bulk to
+    // amortize all the fixed costs per RPC.
+    uint32_t maxNumHashes = 1000;
+
+    //warming up
     Buffer responseBufferWarmup;
     uint32_t numHashesWarmup;
     uint16_t nextKeyLengthWarmup;
     uint64_t nextKeyHashWarmup;
-    //warming up
+
     cluster->lookupIndexKeys(tableId, indexId, firstKey, firstKeyLength,
                         firstAllowedKeyHash, lastKey, lastKeyLength,
+                        maxNumHashes,
                         &responseBufferWarmup, &numHashesWarmup,
                         &nextKeyLengthWarmup, &nextKeyHashWarmup);
     // record many measurements for each point and then take
@@ -388,7 +488,7 @@ timeLookupAndIndexedRead(uint64_t tableId, uint8_t indexId, Key& pk,
 
         start = Cycles::rdtsc();
         cluster->lookupIndexKeys(tableId, indexId, firstKey, firstKeyLength,
-                    firstAllowedKeyHash, lastKey, lastKeyLength,
+                    firstAllowedKeyHash, lastKey, lastKeyLength, maxNumHashes,
                     &responseBuffer, &numHashes, &nextKeyLength, &nextKeyHash);
 
         timeTaken = Cycles::rdtsc() - start;
@@ -535,7 +635,54 @@ timeRead(uint64_t tableId, const void* key, uint16_t keyLength,
 }
 
 /**
- * Time how long it takes to write a particular object repeatedly.
+ * Read a particular object repeatedly and return information about
+ * the distribution of read times.
+ *
+ * \param tableId
+ *      Table containing the object.
+ * \param key
+ *      Variable length key that uniquely identifies the object within tableId.
+ * \param keyLength
+ *      Size in bytes of the key.
+ * \param count
+ *      Read the object this many times.
+ * \param value
+ *      The contents of the object will be stored here, in case
+ *      the caller wants to check them.
+ *
+ * \return
+ *      Information about how long the reads took.
+ */
+TimeDist
+readDist(uint64_t tableId, const void* key, uint16_t keyLength,
+         int count, Buffer& value)
+{
+    uint64_t total = 0;
+    std::vector<uint64_t> times;
+    times.resize(count);
+
+    // Read the value once just to warm up all the caches everywhere.
+    cluster->read(tableId, key, keyLength, &value);
+
+    for (int i = 0; i < count; i++) {
+        uint64_t start = Cycles::rdtsc();
+        cluster->read(tableId, key, keyLength, &value);
+        uint64_t interval = Cycles::rdtsc() - start;
+        total += interval;
+        times[i] = interval;
+    }
+    TimeDist result;
+    getDist(times, &result);
+    double totalBytes = value.size();
+    totalBytes *= count;
+    result.bandwidth = totalBytes/Cycles::toSeconds(total);
+
+    return result;
+}
+
+/**
+ * Write a particular object repeatedly and return information about
+ * the distribution of write times.
  *
  * \param tableId
  *      Table containing the object.
@@ -547,35 +694,37 @@ timeRead(uint64_t tableId, const void* key, uint16_t keyLength,
  *      Pointer to first byte of contents to write into the object.
  * \param length
  *      Size of data at \c value.
- * \param ms
- *      Write the object repeatedly until this many total ms have
- *      elapsed.
+ * \param count
+ *      Write the object this many times.
  *
  * \return
- *      The average time to write the object, in seconds.
+ *      Information about how long the writes took.
  */
-double
-timeWrite(uint64_t tableId, const void* key, uint16_t keyLength,
-          const void* value, uint32_t length, double ms)
+TimeDist
+writeDist(uint64_t tableId, const void* key, uint16_t keyLength,
+          const void* value, uint32_t length, int count)
 {
-    uint64_t runCycles = Cycles::fromSeconds(ms/1e03);
+    uint64_t total = 0;
+    std::vector<uint64_t> times;
+    times.resize(count);
 
     // Write the value once just to warm up all the caches everywhere.
     cluster->write(tableId, key, keyLength, value, length);
 
-    uint64_t start = Cycles::rdtsc();
-    uint64_t elapsed;
-    int count = 0;
-    while (true) {
-        for (int i = 0; i < 10; i++) {
-            cluster->write(tableId, key, keyLength, value, length);
-        }
-        count += 10;
-        elapsed = Cycles::rdtsc() - start;
-        if (elapsed >= runCycles)
-            break;
+    for (int i = 0; i < count; i++) {
+        uint64_t start = Cycles::rdtsc();
+        cluster->write(tableId, key, keyLength, value, length);
+        uint64_t interval = Cycles::rdtsc() - start;
+        total += interval;
+        times[i] = interval;
     }
-    return Cycles::toSeconds(elapsed)/count;
+    TimeDist result;
+    getDist(times, &result);
+    double totalBytes = length;
+    totalBytes *= count;
+    result.bandwidth = totalBytes/Cycles::toSeconds(total);
+
+    return result;
 }
 
 /**
@@ -686,18 +835,21 @@ checkBuffer(Buffer* buffer, uint32_t offset, uint32_t expectedLength,
 }
 
 /**
- * Compute the value to be used to construct a key for a particular
- * control value in a particular client.
+ * Compute the key for a particular control value in a particular client.
  *
  * \param client
  *      Index of the desired client.
- * \param id
- *      Control word for the particular client.
+ * \param name
+ *      Name of control value: state (current state of the slave),
+ *      command (command issued by the master for the slave),
+ *      doc (documentation string for use in log messages), or
+ *      metrics (statistics returned from slaves back to the master).
+ *
  */
-MakeKey
-keyVal(int client, Id id)
+string
+keyVal(int client, const char* name)
 {
-    return MakeKey((client << 8) + id);
+    return format("%d:%s", client, name);
 }
 
 /**
@@ -709,8 +861,9 @@ keyVal(int client, Id id)
 void
 setSlaveState(const char* state)
 {
-    MakeKey key(keyVal(clientIndex, STATE));
-    cluster->write(controlTable, key.get(), key.length(), state);
+    string key = keyVal(clientIndex, "state");
+    cluster->write(controlTable, key.c_str(), downCast<uint16_t>(key.length()),
+            state);
 }
 
 /**
@@ -766,12 +919,14 @@ getCommand(char* buffer, uint32_t size)
 {
     while (true) {
         try {
-            MakeKey key(keyVal(clientIndex, COMMAND));
-            readObject(controlTable, key.get(), key.length(), buffer, size);
+            string key = keyVal(clientIndex, "command");
+            readObject(controlTable, key.c_str(),
+                    downCast<uint16_t>(key.length()), buffer, size);
             if (strcmp(buffer, "idle") != 0) {
                 // Delete the command value so we don't process the same
                 // command twice.
-                cluster->remove(controlTable, key.get(), key.length());
+                cluster->remove(controlTable, key.c_str(),
+                        downCast<uint16_t>(key.length()));
                 return buffer;
             }
         }
@@ -854,8 +1009,9 @@ void
 waitSlave(int slave, const char* state, double timeout = 1.0)
 {
     Buffer value;
-    MakeKey key(keyVal(slave, STATE));
-    waitForObject(controlTable, key.get(), key.length(), state, value, timeout);
+    string key = keyVal(slave, "state");
+    waitForObject(controlTable, key.c_str(), downCast<uint16_t>(key.length()),
+            state, value, timeout);
 }
 
 /**
@@ -881,8 +1037,9 @@ sendCommand(const char* command, const char* state, int firstSlave,
 {
     if (command != NULL) {
         for (int i = 0; i < numSlaves; i++) {
-            MakeKey key(keyVal(firstSlave+i, COMMAND));
-            cluster->write(controlTable, key.get(), key.length(), command);
+            string key = keyVal(firstSlave+i, "command");
+            cluster->write(controlTable, key.c_str(),
+                    downCast<uint16_t>(key.length()), command);
         }
     }
     if (state != NULL) {
@@ -965,8 +1122,8 @@ sendMetrics(double m0, double m1 = 0.0, double m2 = 0.0, double m3 = 0.0,
     metrics[5] = m5;
     metrics[6] = m6;
     metrics[7] = m7;
-    MakeKey key(keyVal(clientIndex, METRICS));
-    cluster->write(controlTable, key.get(), key.length(),
+    string key = keyVal(clientIndex, "metrics");
+    cluster->write(controlTable, key.c_str(), downCast<uint16_t>(key.length()),
             metrics, sizeof(metrics));
 }
 
@@ -998,9 +1155,9 @@ getMetrics(ClientMetrics& metrics, int clientCount)
     // Iterate over all the slaves to fetch metrics from each.
     for (int client = 0; client < clientCount; client++) {
         Buffer metricsBuffer;
-        MakeKey key(keyVal(client, METRICS));
-        waitForObject(controlTable, key.get(), key.length(),
-                NULL, metricsBuffer);
+        string key = keyVal(client, "metrics");
+        waitForObject(controlTable, key.c_str(),
+                downCast<uint16_t>(key.length()), NULL, metricsBuffer);
         const double* clientMetrics = static_cast<const double*>(
                 metricsBuffer.getRange(0,
                 MAX_METRICS*sizeof32(double)));  // NOLINT
@@ -1103,6 +1260,8 @@ basic()
         return;
     Buffer input, output;
     int sizes[] = {100, 1000, 10000, 100000, 1000000};
+    int readCounts[] = {100000, 100000, 100000, 10000, 10000};
+    int writeCounts[] = {10000, 10000, 10000, 1000, 1000};
     const char* ids[] = {"100", "1K", "10K", "100K", "1M"};
     const char* key = "123456789012345678901234567890";
     uint16_t keyLength = downCast<uint16_t>(strlen(key));
@@ -1114,17 +1273,31 @@ basic()
         cluster->write(dataTable, key, keyLength,
                 input.getRange(0, size), size);
         Buffer output;
-        double t = timeRead(dataTable, key, keyLength, 100, output);
+        TimeDist dist = readDist(dataTable, key, keyLength, readCounts[i],
+                output);
         checkBuffer(&output, 0, size, dataTable, key, keyLength);
 
-        snprintf(name, sizeof(name), "basic.read%s", ids[i]);
         snprintf(description, sizeof(description),
-                "read single %sB object with %uB key", ids[i], keyLength);
-        printTime(name, t, description);
+                "read single %sB object (%uB key)", ids[i], keyLength);
+        snprintf(name, sizeof(name), "basic.read%s", ids[i]);
+        printf("%-20s %s     %s median\n", name, formatTime(dist.p50).c_str(),
+                description);
+        snprintf(name, sizeof(name), "basic.read%s.min", ids[i]);
+        printf("%-20s %s     %s minimum\n", name, formatTime(dist.min).c_str(),
+                description);
+        snprintf(name, sizeof(name), "basic.read%s.9", ids[i]);
+        printf("%-20s %s     %s 90%%\n", name, formatTime(dist.p90).c_str(),
+                description);
+        snprintf(name, sizeof(name), "basic.read%s.99", ids[i]);
+        printf("%-20s %s     %s 99%%\n", name, formatTime(dist.p99).c_str(),
+                description);
+        snprintf(name, sizeof(name), "basic.read%s.999", ids[i]);
+        printf("%-20s %s     %s 99.9%%\n", name, formatTime(dist.p999).c_str(),
+                description);
         snprintf(name, sizeof(name), "basic.readBw%s", ids[i]);
         snprintf(description, sizeof(description),
-                "bandwidth reading %sB object with %uB key", ids[i], keyLength);
-        printBandwidth(name, size/t, description);
+                "bandwidth reading %sB object (%uB key)", ids[i], keyLength);
+        printBandwidth(name, dist.bandwidth, description);
     }
 
     for (int i = 0; i < 5; i++) {
@@ -1133,20 +1306,33 @@ basic()
         cluster->write(dataTable, key, keyLength,
                 input.getRange(0, size), size);
         Buffer output;
-        double t = timeWrite(dataTable, key, keyLength,
-                input.getRange(0, size), size, 100);
+        TimeDist dist = writeDist(dataTable, key, keyLength,
+                input.getRange(0, size), size, writeCounts[i]);
         // Make sure the object was properly written.
         cluster->read(dataTable, key, keyLength, &output);
         checkBuffer(&output, 0, size, dataTable, key, keyLength);
 
-        snprintf(name, sizeof(name), "basic.write%s", ids[i]);
         snprintf(description, sizeof(description),
-                "write single %sB object with %uB key", ids[i], keyLength);
-        printTime(name, t, description);
+                "write single %sB object (%uB key)", ids[i], keyLength);
+        snprintf(name, sizeof(name), "basic.write%s", ids[i]);
+        printf("%-20s %s     %s median\n", name, formatTime(dist.p50).c_str(),
+                description);
+        snprintf(name, sizeof(name), "basic.write%s.min", ids[i]);
+        printf("%-20s %s     %s minimum\n", name, formatTime(dist.min).c_str(),
+                description);
+        snprintf(name, sizeof(name), "basic.write%s.9", ids[i]);
+        printf("%-20s %s     %s 90%%\n", name, formatTime(dist.p90).c_str(),
+                description);
+        snprintf(name, sizeof(name), "basic.write%s.99", ids[i]);
+        printf("%-20s %s     %s 99%%\n", name, formatTime(dist.p99).c_str(),
+                description);
+        snprintf(name, sizeof(name), "basic.write%s.999", ids[i]);
+        printf("%-20s %s     %s 99.9%%\n", name, formatTime(dist.p999).c_str(),
+                description);
         snprintf(name, sizeof(name), "basic.writeBw%s", ids[i]);
         snprintf(description, sizeof(description),
-                "bandwidth writing %sB object with %uB key", ids[i], keyLength);
-        printBandwidth(name, size/t, description);
+                "bandwidth writing %sB object (%uB key)", ids[i], keyLength);
+        printBandwidth(name, dist.bandwidth, description);
     }
 }
 
@@ -1163,10 +1349,11 @@ broadcast()
             getCommand(command, sizeof(command));
             if (strcmp(command, "read") == 0) {
                 setSlaveState("waiting");
-                // Wait for a non-empty DOC string to appear.
+                // Wait for a non-empty "doc" string to appear.
                 while (true) {
-                    MakeKey key(keyVal(0, DOC));
-                    readObject(controlTable, key.get(), key.length(),
+                    string key = keyVal(0, "doc");
+                    readObject(controlTable, key.c_str(),
+                            downCast<uint16_t>(key.length()),
                             message, sizeof(message));
                     if (message[0] != 0) {
                         break;
@@ -1190,11 +1377,13 @@ broadcast()
     for (int i = 0; i < count; i++) {
         char message[30];
         snprintf(message, sizeof(message), "message %d", i);
-        MakeKey key(keyVal(clientIndex, DOC));
-        cluster->write(controlTable, key.get(), key.length(), "");
+        string key = keyVal(clientIndex, "doc");
+        cluster->write(controlTable, key.c_str(),
+                downCast<uint16_t>(key.length()), "");
         sendCommand("read", "waiting", 1, numClients-1);
         uint64_t start = Cycles::rdtsc();
-        cluster->write(controlTable, key.get(), key.length(), message);
+        cluster->write(controlTable, key.c_str(),
+                downCast<uint16_t>(key.length()), message);
         for (int slave = 1; slave < numClients; slave++) {
             waitSlave(slave, message);
         }
@@ -1566,10 +1755,12 @@ indexMultiple()
                 uint32_t numHashes;
                 uint16_t nextKeyLength;
                 uint64_t nextKeyHash;
+                uint32_t maxNumHashes = 1000;
                 uint32_t lookupOffset;
                 cluster->lookupIndexKeys(indexTable, z, keyList[z].key,
                     keyList[z].keyLength, 0, keyList[z].key,
-                    keyList[z].keyLength, &lookupResp, &numHashes,
+                    keyList[z].keyLength, maxNumHashes,
+                    &lookupResp, &numHashes,
                     &nextKeyLength, &nextKeyHash);
 
                 assert(1 == numHashes);
@@ -1634,7 +1825,7 @@ indexScalabilityCommonLookup(uint8_t range, int numObjects, char *docString)
 
         Tub<LookupIndexKeysRpc> rpcs[numRequests];
 
-        for (int i =0; i < numRequests; i++){
+        for (int i =0; i < numRequests; i++) {
             char firstKey = static_cast<char>(('a') +
                                     static_cast<int>(generateRandom() % range));
             int randObj = static_cast<int>(generateRandom() % numObjects);
@@ -1647,19 +1838,20 @@ indexScalabilityCommonLookup(uint8_t range, int numObjects, char *docString)
         }
 
         lookupStart = Cycles::rdtsc();
-        for (int i =0; i < numRequests; i++){
+        for (int i =0; i < numRequests; i++) {
             rpcs[i].construct(cluster, dataTable, (uint8_t)1, secondaryKey[i],
                     (uint16_t)30, (uint16_t)0,
-                    secondaryKey[i], (uint16_t)30, &lookupResp[i]);
+                    secondaryKey[i], (uint16_t)30, (uint32_t)1000,
+                    &lookupResp[i]);
         }
 
-        for (int i = 0; i < numRequests; i++){
+        for (int i = 0; i < numRequests; i++) {
             if (rpcs[i])
               rpcs[i]->wait(&numHashes[i], &nextKeyLength[i], &nextKeyHash[i]);
         }
         lookupEnd = Cycles::rdtsc();
 
-        for (int i =0; i < numRequests; i++){
+        for (int i =0; i < numRequests; i++) {
             Key pk(dataTable, primaryKey[i], 30);
             uint32_t lookupOffset;
             lookupOffset = sizeof32(WireFormat::LookupIndexKeys::Response);
@@ -1741,13 +1933,14 @@ indexScalabilityCommonLookupRead(uint8_t range, int numObjects, char *docString)
         }
 
         lookupStart = Cycles::rdtsc();
-        for (int i =0; i < numRequests; i++){
+        for (int i =0; i < numRequests; i++) {
             rpcs[i].construct(cluster, dataTable, (uint8_t)1, secondaryKey[i],
                     (uint16_t)30, (uint16_t)0,
-                    secondaryKey[i], (uint16_t)30, &lookupResp[i]);
+                    secondaryKey[i], (uint16_t)30, (uint32_t)1000,
+                    &lookupResp[i]);
         }
 
-        for (int i = 0; i < numRequests; i++){
+        for (int i = 0; i < numRequests; i++) {
             if (rpcs[i]) {
               rpcs[i]->wait(&numHashes[i], &nextKeyLength[i], &nextKeyHash[i]);
               readRpcs[i].construct(cluster, dataTable, numHashes[i],
@@ -1756,7 +1949,7 @@ indexScalabilityCommonLookupRead(uint8_t range, int numObjects, char *docString)
             }
         }
 
-        for (int i = 0; i < numRequests; i++){
+        for (int i = 0; i < numRequests; i++) {
             if (readRpcs[i])
                 readRpcs[i]->wait(&readNumObjects[i]);
         }
@@ -1804,8 +1997,9 @@ indexScalability()
             char doc[200];
             getCommand(command, sizeof(command));
             if (strcmp(command, "run") == 0) {
-                MakeKey controlKey(keyVal(0, DOC));
-                readObject(controlTable, controlKey.get(), controlKey.length(),
+                string controlKey = keyVal(0, "doc");
+                readObject(controlTable, controlKey.c_str(),
+                        downCast<uint16_t>(controlKey.length()),
                         doc, sizeof(doc));
                 setSlaveState("running");
                 indexScalabilityCommonLookup(numIndexlets,
@@ -1859,9 +2053,11 @@ indexScalability()
             uint32_t numHashes;
             uint16_t nextKeyLength;
             uint64_t nextKeyHash;
+            uint32_t maxNumHashes = 1000;
             cluster->lookupIndexKeys(dataTable, indexId, keyList[1].key,
                 keyList[1].keyLength, firstAllowedKeyHash, keyList[1].key,
-                keyList[1].keyLength, &lookupResp, &numHashes, &nextKeyLength,
+                keyList[1].keyLength, maxNumHashes,
+                &lookupResp, &numHashes, &nextKeyLength,
                 &nextKeyHash);
 
             //verify
@@ -1886,8 +2082,9 @@ indexScalability()
     for (int numActive = 1; numActive <= numClients; numActive++) {
         char doc[100];
         snprintf(doc, sizeof(doc), "%d active clients", numActive);
-        MakeKey key(keyVal(0, DOC));
-        cluster->write(controlTable, key.get(), key.length(), doc);
+        string key = keyVal(0, "doc");
+        cluster->write(controlTable, key.c_str(),
+                downCast<uint16_t>(key.length()), doc);
         sendCommand("run", "running", 1, numActive-1);
         indexScalabilityCommonLookup(numIndexlets, numObjectsPerIndexlet, doc);
         sendCommand(NULL, "idle", 1, numActive-1);
@@ -2117,7 +2314,7 @@ netBandwidth()
     RAMCLOUD_LOG(DEBUG, "Master reading from table %lu", tableIds[0]);
     Buffer value;
     double latency = timeRead(tableIds[0], key, keyLength, 100, value);
-    double bandwidth = value.size()/latency;
+    double bandwidth = (keyLength + value.size())/latency;
     sendMetrics(bandwidth);
 
     // Collect statistics.
@@ -2264,6 +2461,110 @@ readDist()
     printf("\n");
 }
 
+// Read randomly-chosen objects from a large table (so that there will be cache
+// misses on the hash table and the object) and compute a cumulative
+// distribution of read times.
+void
+readDistRandom()
+{
+    #define NUM_KEYS 2000000
+    #define BATCH_SIZE 500
+    if (clientIndex != 0)
+        return;
+
+    const uint16_t keyLength = 30;
+
+    char key[keyLength];
+    Buffer input, value;
+
+    // Initialize keys and values
+    MultiWriteObject** objects = new MultiWriteObject*[BATCH_SIZE];
+    char* keys = new char[BATCH_SIZE * keyLength];
+    memset(keys, 0, BATCH_SIZE * keyLength);
+
+    char* charValues = new char[BATCH_SIZE * objectSize];
+    memset(charValues, 0, BATCH_SIZE * objectSize);
+
+    uint64_t i, j;
+    for (i = 0; i < NUM_KEYS; i++) {
+        j = i % BATCH_SIZE;
+
+        char* key = keys + j * keyLength;
+        char* value = charValues + j * objectSize;
+        *reinterpret_cast<uint64_t*>(key) = i;
+        genRandomString(value, objectSize);
+        objects[j] = new MultiWriteObject(dataTable, key, keyLength, value,
+                objectSize);
+
+        // Do the write and recycle the objects
+        if (j == BATCH_SIZE - 1) {
+            cluster->multiWrite(objects, BATCH_SIZE);
+
+            // Clean up the actual MultiWriteObjects
+            for (int k = 0; k < BATCH_SIZE; k++)
+                delete objects[k];
+
+            memset(keys, 0, BATCH_SIZE * keyLength);
+            memset(charValues, 0, BATCH_SIZE * objectSize);
+        }
+    }
+
+    // Do the last partial batch and clean up, if it exists.
+    j = i % BATCH_SIZE;
+    if (j < BATCH_SIZE - 1) {
+        cluster->multiWrite(objects, static_cast<uint32_t>(j));
+
+        // Clean up the actual MultiWriteObjects
+        for (uint64_t k = 0; k < j; k++)
+            delete objects[k];
+    }
+
+    delete[] keys;
+    delete[] charValues;
+    delete[] objects;
+
+    // Force serialization so that writing interferes less with the read
+    // benchmark.
+    Util::serialize();
+
+    // Issue the reads back-to-back, and save the times.
+    std::vector<uint64_t> ticks;
+    ticks.resize(count);
+    for (int i = 0; i < count; i++) {
+        // We generate the random number separately to avoid timing potential
+        // cache misses on the client side.
+        memset(key, 0, keyLength);
+        *reinterpret_cast<uint64_t*>(&key) = generateRandom() % NUM_KEYS;
+
+        // Do the benchmark
+        uint64_t start = Cycles::rdtsc();
+        cluster->read(dataTable, key, keyLength, &value);
+        ticks[i] = Cycles::rdtsc() - start;
+    }
+
+    // Dump cache traces. This amounts to almost a no-op if there are no
+    // traces, and we do not currently expect traces in production code.
+    cluster->objectServerControl(dataTable, key, keyLength,
+            WireFormat::LOG_TIME_TRACE);
+
+    // Output the times (several comma-separated values on each line).
+    int valuesInLine = 0;
+    for (int i = 0; i < count; i++) {
+        if (valuesInLine >= 10) {
+            valuesInLine = 0;
+            printf("\n");
+        }
+        if (valuesInLine != 0) {
+            printf(",");
+        }
+        double micros = Cycles::toSeconds(ticks[i])*1.0e06;
+        printf("%.2f", micros);
+        valuesInLine++;
+    }
+    printf("\n");
+    #undef NUM_KEYS
+}
+
 // This benchmark measures the latency and server throughput for reads
 // when several clients are simultaneously reading the same object.
 void
@@ -2280,8 +2581,9 @@ readLoaded()
             char doc[200];
             getCommand(command, sizeof(command));
             if (strcmp(command, "run") == 0) {
-                MakeKey controlKey(keyVal(0, DOC));
-                readObject(controlTable, controlKey.get(), controlKey.length(),
+                string controlKey = keyVal(0, "doc");
+                readObject(controlTable, controlKey.c_str(),
+                        downCast<uint16_t>(controlKey.length()),
                         doc, sizeof(doc));
                 setSlaveState("running");
 
@@ -2339,8 +2641,9 @@ readLoaded()
         char message[100];
         Buffer input, output;
         snprintf(message, sizeof(message), "%d active clients", numSlaves+1);
-        MakeKey controlKey(keyVal(0, DOC));
-        cluster->write(controlTable, controlKey.get(), controlKey.length(),
+        string controlKey = keyVal(0, "doc");
+        cluster->write(controlTable, controlKey.c_str(),
+                downCast<uint16_t>(controlKey.length()),
                 message);
         cluster->write(dataTable, key, keyLength, "");
         sendCommand("run", "running", 1, numSlaves);
@@ -2473,9 +2776,10 @@ readRandom()
                         tableIds[i] = cluster->getTableId(tableName);
                     }
                 }
-                MakeKey controlKey(keyVal(0, DOC));
-                readObject(controlTable, controlKey.get(), controlKey.length(),
-                        doc, sizeof(doc));
+                string controlKey = keyVal(0, "doc");
+                readObject(controlTable, controlKey.c_str(),
+                        downCast<uint16_t>(controlKey.length()), doc,
+                        sizeof(doc));
                 setSlaveState("running");
                 readRandomCommon(tableIds, doc);
                 setSlaveState("idle");
@@ -2511,8 +2815,9 @@ readRandom()
     for (int numActive = 1; numActive <= numClients; numActive++) {
         char doc[100];
         snprintf(doc, sizeof(doc), "%d active clients", numActive);
-        MakeKey key(keyVal(0, DOC));
-        cluster->write(controlTable, key.get(), key.length(), doc);
+        string key = keyVal(0, "doc");
+        cluster->write(controlTable, key.c_str(),
+                downCast<uint16_t>(key.length()), doc);
         sendCommand("run", "running", 1, numActive-1);
         readRandomCommon(tableIds, doc);
         sendCommand(NULL, "idle", 1, numActive-1);
@@ -2557,11 +2862,11 @@ readVaryingKeyLength()
         fillBuffer(input, dataLength, dataTable, key, keyLength);
         cluster->write(dataTable, key, keyLength,
                 input.getRange(0, dataLength), dataLength);
-        double t = timeRead(dataTable, key, keyLength, 100, output);
+        double t = readDist(dataTable, key, keyLength, 1000, output).p50;
         checkBuffer(&output, 0, dataLength, dataTable, key, keyLength);
 
         printf("%12u %16.1f %19.1f\n", keyLength, 1e06*t,
-               (keyLength / t)/(1024.0*1024.0));
+               ((keyLength + dataLength) / t)/(1024.0*1024.0));
     }
 }
 
@@ -2595,14 +2900,14 @@ writeVaryingKeyLength()
         fillBuffer(input, dataLength, dataTable, key, keyLength);
         cluster->write(dataTable, key, keyLength,
                 input.getRange(0, dataLength), dataLength);
-        double t = timeWrite(dataTable, key, keyLength,
-                input.getRange(0, dataLength), dataLength, 100);
+        TimeDist dist = writeDist(dataTable, key, keyLength,
+                input.getRange(0, dataLength), dataLength, 1000);
         Buffer output;
         cluster->read(dataTable, key, keyLength, &output);
         checkBuffer(&output, 0, dataLength, dataTable, key, keyLength);
 
-        printf("%12u %16.1f %19.1f\n", keyLength, 1e06*t,
-               (keyLength / t)/(1024.0*1024.0));
+        printf("%12u %16.1f %19.1f\n", keyLength, 1e06*dist.p50,
+               ((keyLength+dataLength) / dist.p50)/(1024.0*1024.0));
     }
 }
 
@@ -2698,6 +3003,7 @@ TestInfo tests[] = {
     {"netBandwidth", netBandwidth},
     {"readAllToAll", readAllToAll},
     {"readDist", readDist},
+    {"readDistRandom", readDistRandom},
     {"readLoaded", readLoaded},
     {"readNotFound", readNotFound},
     {"readRandom", readRandom},

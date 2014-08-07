@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2012 Stanford University
+/* Copyright (c) 2009-2014 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -161,6 +161,12 @@ class ReplicaManager
      * Used by ReplicatedSegment to throttle rpc creation.
      */
     uint32_t writeRpcsInFlight;
+
+    /**
+     * Number of collective outstanding free rpcs to all backups.
+     * Used by ReplicatedSegment to throttle rpc creation.
+     */
+    uint32_t freeRpcsInFlight;
 
     /**
      * Provides access to the latest replicationEpoch acknowledged by the

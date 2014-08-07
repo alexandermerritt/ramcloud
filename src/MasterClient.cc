@@ -96,25 +96,25 @@ DropTabletOwnershipRpc::DropTabletOwnershipRpc(Context* context,
  * \param serverId
  *      Identifier for the target server.
  * \param tableId
- *      Identifier for the table containing the tablet.
+ *      Identifier for the table containing the index.
  * \param indexId
  *      Identifier for the index for the given table.
  * \param firstKey
  *      Blob of the smallest key in the index key space for the index of table
  *      belonging to the indexlet.
  * \param firstKeyLength
- *      Length of the firstKey.
+ *      Number of bytes in the firstKey.
  * \param firstNotOwnedKey
- *      Blob of the first not owned key in the index key space for the index of
- *      table belonging to the indexlet.
+ *      Blob of the smallest key in the given index that is after firstKey
+ *      in the index order but not part of this indexlet.
  * \param firstNotOwnedKeyLength
- *      Length of the firstNotOwnedKey.
+ *      Number of bytes in the firstNotOwnedKey.
  */
 void
 MasterClient::dropIndexletOwnership(Context* context, ServerId serverId,
-                      uint64_t tableId, uint8_t indexId, const void *firstKey,
-                      uint16_t firstKeyLength, const void *firstNotOwnedKey,
-                      uint16_t firstNotOwnedKeyLength)
+        uint64_t tableId, uint8_t indexId, const void *firstKey,
+        uint16_t firstKeyLength, const void *firstNotOwnedKey,
+        uint16_t firstNotOwnedKeyLength)
 {
     DropIndexletOwnershipRpc rpc(context, serverId, tableId, indexId,
             firstKey, firstKeyLength, firstNotOwnedKey, firstNotOwnedKeyLength);
@@ -131,19 +131,19 @@ MasterClient::dropIndexletOwnership(Context* context, ServerId serverId,
  * \param serverId
  *      Identifier for the target server.
  * \param tableId
- *      Identifier for the table containing the tablet.
+ *      Identifier for the table containing the index.
  * \param indexId
  *      Identifier for the index for the given table.
  * \param firstKey
  *      Blob of the smallest key in the index key space for the index of table
  *      belonging to the indexlet.
  * \param firstKeyLength
- *      Length of the firstKey.
+ *      Number of bytes in the firstKey.
  * \param firstNotOwnedKey
- *      Blob of the first not owned key in the index key space for the index of
- *      table belonging to the indexlet.
+ *      Blob of the smallest key in the given index that is after firstKey
+ *      in the index order but not part of this indexlet.
  * \param firstNotOwnedKeyLength
- *      Length of the firstNotOwnedKey.
+ *      Number of bytes in the firstNotOwnedKey.
  */
 DropIndexletOwnershipRpc::DropIndexletOwnershipRpc(Context* context,
         ServerId serverId, uint64_t tableId, uint8_t indexId,
@@ -158,8 +158,8 @@ DropIndexletOwnershipRpc::DropIndexletOwnershipRpc(Context* context,
     reqHdr->indexId = indexId;
     reqHdr->firstKeyLength = firstKeyLength;
     reqHdr->firstNotOwnedKeyLength = firstNotOwnedKeyLength;
-    request.append(firstKey, firstKeyLength);
-    request.append(firstNotOwnedKey, firstNotOwnedKeyLength);
+    request.appendExternal(firstKey, firstKeyLength);
+    request.appendExternal(firstNotOwnedKey, firstNotOwnedKeyLength);
     send();
 }
 
@@ -229,7 +229,7 @@ GetHeadOfLogRpc::wait()
 /**
  * This RPC is sent to an index server to request that it insert an index
  * entry in an indexlet it holds.
- * 
+ *
  * \param master
  *      Overall information about this RAMCloud server.
  * \param tableId
@@ -251,7 +251,7 @@ MasterClient::insertIndexEntry(
         uint64_t primaryKeyHash)
 {
     InsertIndexEntryRpc rpc(master, tableId, indexId,
-                            indexKey, indexKeyLength, primaryKeyHash);
+            indexKey, indexKeyLength, primaryKeyHash);
     rpc.wait();
 }
 
@@ -266,9 +266,8 @@ InsertIndexEntryRpc::InsertIndexEntryRpc(
         MasterService* master, uint64_t tableId, uint8_t indexId,
         const void* indexKey, KeyLength indexKeyLength,
         uint64_t primaryKeyHash)
-    : IndexRpcWrapper(master, tableId, indexId,
-                      indexKey, indexKeyLength,
-                      sizeof(WireFormat::InsertIndexEntry::Response))
+    : IndexRpcWrapper(master, tableId, indexId, indexKey, indexKeyLength,
+            sizeof(WireFormat::InsertIndexEntry::Response))
 {
     WireFormat::InsertIndexEntry::Request* reqHdr(
             allocHeader<WireFormat::InsertIndexEntry>());
@@ -276,8 +275,18 @@ InsertIndexEntryRpc::InsertIndexEntryRpc(
     reqHdr->indexId = indexId;
     reqHdr->indexKeyLength = indexKeyLength;
     reqHdr->primaryKeyHash = primaryKeyHash;
-    request.append(indexKey, indexKeyLength);
+    request.appendExternal(indexKey, indexKeyLength);
     send();
+}
+
+/**
+ * Handle the case where the RPC cannot be completed as the containing the index
+ * key was not found.
+ */
+void
+InsertIndexEntryRpc::indexNotFound()
+{
+    response->emplaceAppend<WireFormat::ResponseCommon>()->status = STATUS_OK;
 }
 
 /**
@@ -517,7 +526,7 @@ ReceiveMigrationDataRpc::ReceiveMigrationDataRpc(Context* context,
  * \param partitionId
  *      The partition id of #tablets inside the crashed master's will.
  * \param recoveryPartition
- *      A set of tablets and indexlets with key ranges describing which poritions 
+ *      A set of tablets and indexlets with key ranges describing which poritions
  *      of which tables and indexlets the recovery Master should take over for.
  * \param replicas
  *      An array describing where to find replicas of each segment.
@@ -575,7 +584,7 @@ RecoverRpc::RecoverRpc(Context* context, ServerId serverId,
     reqHdr->partitionId = partitionId;
     reqHdr->tabletsLength = serializeToRequest(&request, recoveryPartition);
     reqHdr->numReplicas = numReplicas;
-    request.append(replicas,
+    request.appendExternal(replicas,
             downCast<uint32_t>(sizeof(replicas[0])) * numReplicas);
     send();
 }
@@ -605,7 +614,7 @@ MasterClient::removeIndexEntry(
         uint64_t primaryKeyHash)
 {
     RemoveIndexEntryRpc rpc(master, tableId, indexId,
-                            indexKey, indexKeyLength, primaryKeyHash);
+            indexKey, indexKeyLength, primaryKeyHash);
     rpc.wait();
 }
 
@@ -620,9 +629,8 @@ RemoveIndexEntryRpc::RemoveIndexEntryRpc(
         MasterService* master, uint64_t tableId, uint8_t indexId,
         const void* indexKey, KeyLength indexKeyLength,
         uint64_t primaryKeyHash)
-    : IndexRpcWrapper(master, tableId, indexId,
-                      indexKey, indexKeyLength,
-                      sizeof(WireFormat::RemoveIndexEntry::Response))
+    : IndexRpcWrapper(master, tableId, indexId, indexKey, indexKeyLength,
+            sizeof(WireFormat::RemoveIndexEntry::Response))
 {
     WireFormat::RemoveIndexEntry::Request* reqHdr(
             allocHeader<WireFormat::RemoveIndexEntry>());
@@ -630,8 +638,18 @@ RemoveIndexEntryRpc::RemoveIndexEntryRpc(
     reqHdr->indexId = indexId;
     reqHdr->indexKeyLength = indexKeyLength;
     reqHdr->primaryKeyHash = primaryKeyHash;
-    request.append(indexKey, indexKeyLength);
+    request.appendExternal(indexKey, indexKeyLength);
     send();
+}
+
+/**
+ * Handle the case where the RPC cannot be completed as the containing the index
+ * key was not found.
+ */
+void
+RemoveIndexEntryRpc::indexNotFound()
+{
+    response->emplaceAppend<WireFormat::ResponseCommon>()->status = STATUS_OK;
 }
 
 /**
@@ -758,27 +776,27 @@ TakeTabletOwnershipRpc::TakeTabletOwnershipRpc(
  * \param indexId
  *      Identifier for the index for the given table.
  * \param indexletTableId
- *      Id of the table that will hold objects for this indexlet
+ *      Id of the table that will hold objects for this indexlet.
  * \param firstKey
  *      Blob of the smallest key in the index key space for the index of table
  *      belonging to the indexlet.
  * \param firstKeyLength
- *      Length of the firstKey.
+ *      Number of bytes in the firstKey.
  * \param firstNotOwnedKey
- *      Blob of the first not owned key in the index key space for the index of
- *      table belonging to the indexlet.
+ *      Blob of the smallest key in the given index that is after firstKey
+ *      in the index order but not part of this indexlet.
  * \param firstNotOwnedKeyLength
- *      Length of the firstNotOwnedKey.
+ *      Number of bytes in the firstNotOwnedKey.
  */
 void
 MasterClient::takeIndexletOwnership(Context* context, ServerId serverId,
-                uint64_t tableId, uint8_t indexId, uint64_t indexletTableId,
-                const void *firstKey, uint16_t firstKeyLength,
-                const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength)
+        uint64_t tableId, uint8_t indexId, uint64_t indexletTableId,
+        const void *firstKey, uint16_t firstKeyLength,
+        const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength)
 {
     TakeIndexletOwnershipRpc rpc(context, serverId, tableId, indexId,
-                                    indexletTableId, firstKey, firstKeyLength,
-                                    firstNotOwnedKey, firstNotOwnedKeyLength);
+            indexletTableId, firstKey, firstKeyLength,
+            firstNotOwnedKey, firstNotOwnedKeyLength);
     rpc.wait();
 }
 
@@ -801,12 +819,12 @@ MasterClient::takeIndexletOwnership(Context* context, ServerId serverId,
  *      Blob of the smallest key in the index key space for the index of table
  *      belonging to the indexlet.
  * \param firstKeyLength
- *      Length of the firstKey.
+ *      Number of bytes in the firstKey.
  * \param firstNotOwnedKey
- *      Blob of the first not owned key in the index key space for the index of
- *      table belonging to the indexlet.
+ *      Blob of the smallest key in the given index that is after firstKey
+ *      in the index order but not part of this indexlet.
  * \param firstNotOwnedKeyLength
- *      Length of the firstNotOwnedKey.
+ *      Number of bytes in the firstNotOwnedKey.
  */
 TakeIndexletOwnershipRpc::TakeIndexletOwnershipRpc(
         Context* context, ServerId serverId, uint64_t tableId,
@@ -823,8 +841,8 @@ TakeIndexletOwnershipRpc::TakeIndexletOwnershipRpc(
     reqHdr->indexletTableId = indexletTableId;
     reqHdr->firstKeyLength = firstKeyLength;
     reqHdr->firstNotOwnedKeyLength = firstNotOwnedKeyLength;
-    request.append(firstKey, firstKeyLength);
-    request.append(firstNotOwnedKey, firstNotOwnedKeyLength);
+    request.appendExternal(firstKey, firstKeyLength);
+    request.appendExternal(firstNotOwnedKey, firstNotOwnedKeyLength);
     send();
 }
 

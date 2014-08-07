@@ -28,8 +28,9 @@ namespace RAMCloud {
  * \param tableId
  *      The table containing the desired object.
  * \param indexId
- *      Id of the index key for which this RPC is being sent.
+ *      Id of the index to which the indexed key belongs.
  * \param key
+ *      Variable length indexed key corresponding to an object.
  *      The location of key determines which server this rpc will be sent to.
  *      It does not necessarily have to be null terminated. The caller must
  *      ensure that the storage for this key is unchanged through the life of
@@ -42,10 +43,10 @@ namespace RAMCloud {
  *      contain at least this much data, and a pointer to the header
  *      will be stored in the responseHeader for the use of wrapper
  *      subclasses.
- * 
  * \param responseBuffer
  *      Optional client-supplied buffer to use for the RPC's response;
- *      if NULL then we use a built-in buffer.
+ *      if NULL then we use a built-in buffer. Any existing contents
+ *      of this buffer will be cleared automatically by the transport.
  */
 IndexRpcWrapper::IndexRpcWrapper(
             RamCloud* ramcloud, uint64_t tableId, uint8_t indexId,
@@ -58,7 +59,6 @@ IndexRpcWrapper::IndexRpcWrapper(
     , indexId(indexId)
     , key(key)
     , keyLength(keyLength)
-    , foundIndex(true)
 {
 }
 
@@ -70,8 +70,9 @@ IndexRpcWrapper::IndexRpcWrapper(
  * \param tableId
  *      The table containing the desired object.
  * \param indexId
- *      Id of the index key for which this RPC is being sent.
+ *      Id of the index to which the indexed key belongs.
  * \param key
+ *      Variable length indexed key corresponding to an object.
  *      The location of key determines which server this rpc will be sent to.
  *      It does not necessarily have to be null terminated.  The caller must
  *      ensure that the storage for this key is unchanged through the life of
@@ -100,7 +101,6 @@ IndexRpcWrapper::IndexRpcWrapper(
     , indexId(indexId)
     , key(key)
     , keyLength(keyLength)
-    , foundIndex(true)
 {
 }
 
@@ -136,6 +136,19 @@ IndexRpcWrapper::handleTransportError()
     return false;
 }
 
+/**
+ * Handle the case where the RPC cannot be completed as the containing the index
+ * key was not found.
+ */
+void
+IndexRpcWrapper::indexNotFound()
+{
+    LOG(DEBUG, "Index not found for tableId %lu, indexId %u",
+            tableId, indexId);
+    response->emplaceAppend<WireFormat::ResponseCommon>()->status =
+            STATUS_UNKNOWN_INDEX;
+}
+
 // See RpcWrapper for documentation.
 void
 IndexRpcWrapper::send()
@@ -143,20 +156,15 @@ IndexRpcWrapper::send()
     session = objectFinder->lookup(tableId, indexId, key, keyLength);
 
     // This index doesn't exist. No need to send an rpc or throw an
-    // exception. Instead, lets fake a valid response with no data!
+    // exception. Instead, lets call indexNotFound() which will do the
+    // appropriate thing, then call completed() so the rpc is never sent out.
     if (session == Transport::SessionRef()) {
-        foundIndex = false;
-
-        WireFormat::ResponseCommon* respHdr =
-                response->emplaceAppend<WireFormat::ResponseCommon>();
-        respHdr->status = STATUS_OK;
-
+        indexNotFound();
         completed();
-        return;
+    } else {
+        state = IN_PROGRESS;
+        session->sendRequest(&request, response, this);
     }
-
-    state = IN_PROGRESS;
-    session->sendRequest(&request, response, this);
 }
 
 } // namespace RAMCloud

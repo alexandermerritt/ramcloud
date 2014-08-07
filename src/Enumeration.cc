@@ -149,7 +149,7 @@ appendObjectsToBuffer(Log& log,
         buffer->emplaceAppend<uint32_t>(length);
         Buffer::Iterator it(&objectBuffer, 0, length);
         while (!it.isDone()) {
-            buffer->append(it.getData(), it.getLength());
+            buffer->appendExternal(it.getData(), it.getLength());
             it.next();
         }
     }
@@ -299,13 +299,17 @@ Enumeration::complete()
     args.iter = &iter;
     args.objectReferences = &objectRefs;
     void* cookie = static_cast<void*>(&args);
-    for (; bucketIndex < numBuckets && !payloadFull; bucketIndex++) {
+    while (bucketIndex < numBuckets) {
         objectRefs.clear();
         bucketStart = payload.size();
         objectMap.forEachInBucket(enumerateBucket, cookie, bucketIndex);
         int64_t overflow = appendObjectsToBuffer(log, &payload, objectRefs,
                                                  maxPayloadBytes, keysOnly);
         payloadFull = overflow >= 0;
+        if (payloadFull) {
+            break;
+        }
+        bucketIndex++;
     }
 
     // Clean up if last bucket is incomplete.

@@ -27,10 +27,6 @@
 namespace RAMCloud {
 namespace Perf{
 
-/**
- * The number of counters to bulk write at once when dumping to disk.
- */
-const size_t WRITES_PER_BATCH =  100000;
 
 /**
  * After recording this many intervals, we begin writing to disk.

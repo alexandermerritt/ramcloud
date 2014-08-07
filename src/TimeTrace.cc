@@ -93,9 +93,9 @@ void TimeTrace::printInternal(string* s)
         i = 0;
         if (events[0].message == NULL) {
             if (s != NULL) {
-                s->append("No events to print");
+                s->append("No time trace events to print");
             } else {
-                RAMCLOUD_LOG(NOTICE, "No events to print");
+                RAMCLOUD_LOG(NOTICE, "No time trace events to print");
             }
             return;
         }

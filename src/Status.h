@@ -1,4 +1,4 @@
-/* Copyright (c) 2010 Stanford University
+/* Copyright (c) 2010-2014 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -118,7 +118,10 @@ typedef enum Status {
     /// for) a given indexlet, but that it may exist elsewhere in the system.
     STATUS_UNKNOWN_INDEXLET             = 28,
 
-    STATUS_MAX_VALUE                    = 28,
+    /// Indicates that an index containing the given index key cannot be found.
+    STATUS_UNKNOWN_INDEX                = 29,
+
+    STATUS_MAX_VALUE                    = 29,
 
     // Note: if you add a new status value you must make the following
     // additional updates:
@@ -129,6 +132,13 @@ typedef enum Status {
     // * Add a new exception class to ClientException.h
     // * Add a new "case" to ClientException::throwException to map from
     //   the status value to a status-specific ClientException subclass.
+    // * In the Java bindings, add a static class for the exception to
+    //   ClientException.java
+    // * Add a case for the status of the exception to throw the exception in
+    //   ClientException.java
+    // * Add the exception to the Status enum in Status.java, making
+    //   sure the status is in the correct position corresponding to its status
+    //   code.
 } Status;
 
 extern const char* statusToString(Status status);

@@ -37,6 +37,7 @@ class ObjectTest : public ::testing::Test {
           buffer4(),
           objectDataFromBuffer(),
           objectFromBuffer(),
+          objectFromContiguousBuffer(),
           objectFromContiguousVoidPointer(),
           objectFromVoidPointer(),
           objects(),
@@ -59,10 +60,10 @@ class ObjectTest : public ::testing::Test {
         // write some garbage into the buffer so that the starting
         // offset of keysAndValue in keysAndValueBuffer is != 0. In this
         // case, it will be sizeof(stringKeys[0])
-        buffer.append(&stringKeys[0], sizeof(stringKeys[0]));
+        buffer.appendExternal(&stringKeys[0], sizeof(stringKeys[0]));
 
         // this is the starting of keysAndValue in the keysAndValueBuffer
-        buffer.append(&numKeys, sizeof(numKeys));
+        buffer.appendExternal(&numKeys, sizeof(numKeys));
 
         // lengths of all they keys are 3.
         // store cumulativeKeyLengths in the object
@@ -70,16 +71,17 @@ class ObjectTest : public ::testing::Test {
         cumulativeKeyLengths[0] = 3;
         cumulativeKeyLengths[1] = 6;
         cumulativeKeyLengths[2] = 9;
-        buffer.append(cumulativeKeyLengths, 3 *sizeof(CumulativeKeyLength));
+        buffer.appendExternal(cumulativeKeyLengths,
+                              3 *sizeof(CumulativeKeyLength));
 
         // append keys here.
-        buffer.append(&stringKeys[0], sizeof(stringKeys[0]));
-        buffer.append(&stringKeys[1], sizeof(stringKeys[1]));
-        buffer.append(&stringKeys[2], sizeof(stringKeys[2]));
+        buffer.appendExternal(&stringKeys[0], sizeof(stringKeys[0]));
+        buffer.appendExternal(&stringKeys[1], sizeof(stringKeys[1]));
+        buffer.appendExternal(&stringKeys[2], sizeof(stringKeys[2]));
 
         // append data
-        buffer.append(&dataBlob[0], 2);
-        buffer.append(&dataBlob[2], 2);
+        buffer.appendExternal(&dataBlob[0], 2);
+        buffer.appendExternal(&dataBlob[2], 2);
         objectDataFromBuffer.construct(key.getTableId(), 75, 723, buffer,
                                         sizeof32(stringKeys[0]));
 
@@ -98,12 +100,24 @@ class ObjectTest : public ::testing::Test {
                                    buffer2.size() -
                                    sizeof32(stringKeys[0]));
 
+        // Construct a contiguous Buffer to test the conversion to void*
+        // optimization
+        Buffer contiguousBuffer;
+        contiguousBuffer.appendExternal(buffer2.getRange(0, buffer2.size()),
+                                        buffer2.size());
+
+        objectFromContiguousBuffer.construct(contiguousBuffer,
+                                             sizeof32(stringKeys[0]),
+                                             buffer2.size() -
+                                             sizeof32(stringKeys[0]));
+
         // this object will only contain one key
         objectFromVoidPointer.construct(key, dataBlob, 4, 75, 723, buffer3);
 
         objects[0] = &*objectDataFromBuffer;
         objects[1] = &*objectFromBuffer;
         objects[2] = &*objectFromContiguousVoidPointer;
+        objects[3] = &*objectFromContiguousBuffer;
         singleKeyObject = &*objectFromVoidPointer;
     }
 
@@ -130,10 +144,11 @@ class ObjectTest : public ::testing::Test {
 
     Tub<Object> objectDataFromBuffer;
     Tub<Object> objectFromBuffer;
+    Tub<Object> objectFromContiguousBuffer;
     Tub<Object> objectFromContiguousVoidPointer;
     Tub<Object> objectFromVoidPointer;
 
-    Object* objects[3];
+    Object* objects[4];
     // Handle this object separately as it only has one key.
     // This kind of object is primarily used by unit
     // tests
@@ -201,6 +216,7 @@ TEST_F(ObjectTest, constructor_entirelyFromBuffer)
     EXPECT_EQ(75U, object.header.version);
     EXPECT_EQ(723U, object.header.timestamp);
     EXPECT_EQ(0xBB68333C, object.header.checksum);
+    EXPECT_EQ(0, object.keysAndValue);
 
     const uint8_t *keysAndValue = reinterpret_cast<const uint8_t *>(
                             object.getKeysAndValue());
@@ -237,6 +253,8 @@ TEST_F(ObjectTest, constructor_entirelyFromBuffer)
 
     EXPECT_EQ("YO!", string(reinterpret_cast<const char*>(
                     keysAndValue + 3 * sizeof(CumulativeKeyLength) + 9)));
+
+    EXPECT_TRUE((*objectFromContiguousBuffer).keysAndValue);
 }
 
 TEST_F(ObjectTest, constructor_fromContiguousVoidPointer)
@@ -771,10 +789,11 @@ class ObjectTombstoneTest : public ::testing::Test {
 
         Key key(572, stringKey, 5);
 
-        buffer.append(&numKeys, sizeof(numKeys));
-        buffer.append(&cumulativeKeyLength, sizeof(cumulativeKeyLength));
-        buffer.append(stringKey, cumulativeKeyLength + 1);
-        buffer.append(dataBlob, 6);
+        buffer.appendExternal(&numKeys, sizeof(numKeys));
+        buffer.appendExternal(&cumulativeKeyLength,
+                              sizeof(cumulativeKeyLength));
+        buffer.appendExternal(stringKey, cumulativeKeyLength + 1);
+        buffer.appendExternal(dataBlob, 6);
 
         object.construct(key.getTableId(), 58, 723, buffer);
         tombstoneFromObject.construct(*object, 925, 335);

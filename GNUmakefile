@@ -14,6 +14,7 @@ YIELD ?= no
 SSE ?= sse4.2
 COMPILER ?= gnu
 VALGRIND ?= no
+ONLOAD_DIR ?= /usr/local/openonload-201405
 
 ## Create a separate build directory for each git branch and for each arch
 OBJSUFFIX := $(shell git symbolic-ref -q HEAD | \
@@ -25,6 +26,7 @@ TOP	:= $(shell echo $${PWD-`pwd`})
 GTEST_DIR ?= $(TOP)/gtest
 ZOOKEEPER_LIB := /usr/lib/x86_64-linux-gnu/libzookeeper_mt.a
 ZOOKEEPER_DIR := /usr/local/zookeeper-3.4.5
+
 
 ifeq ($(DEBUG),yes)
 BASECFLAGS := -g
@@ -69,7 +71,7 @@ ifeq ($(DEBUG),yes)
 LIBS += -rdynamic
 endif
 
-INCLUDES := -I$(TOP)/src -I$(TOP)/$(OBJDIR) -I$(GTEST_DIR)/include
+INCLUDES := -I$(TOP)/src -I$(TOP)/$(OBJDIR) -I$(GTEST_DIR)/include -I/usr/local/openonload-201405/src/include 
 
 CC ?= gcc
 CXX ?= g++
@@ -83,6 +85,16 @@ PROTOC ?= protoc
 EPYDOC ?= epydoc
 EPYDOCFLAGS ?= --simple-term -v
 DOXYGEN ?= doxygen
+
+# Check if OnLoad is installed on the system. OnLoad is required to build
+# SolarFlare driver code.
+ONLOAD_VERSION := $(shell $(ONLOAD_DIR)/scripts/onload --version 2>/dev/null)
+ifdef ONLOAD_VERSION
+	ONLOAD = yes
+	ONLOAD_LIB := -L$(ONLOAD_DIR)/build/gnu_x86_64/lib/ciul/ -L$(ONLOAD_DIR)/build/gnu_x86_64/lib/citools/ -lcitools1 -lciul1
+	LIBS += $(ONLOAD_LIB)
+	COMFLAGS += -DONLOAD
+endif
 
 # Test whether Infiniband support is available. Avoids using $(COMFLAGS)
 # (particularly, -MD) which results in bad interactions with mergedeps.
@@ -207,7 +219,7 @@ always:
 
 doc: docs
 # Get the branch name and SHA from git and put that into the doxygen mainpage
-docs: python-docs
+docs:
 	@DOCSID=`git branch --no-color | grep "*" | cut -f2 -d" "` ;\
 	DOCSID=$$DOCSID-`cat ".git/$$( git symbolic-ref HEAD )" | cut -c1-6` ;\
 	(echo "PROJECT_NUMBER = \"Version [$$DOCSID]\""; \

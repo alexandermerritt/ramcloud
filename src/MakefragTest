@@ -23,9 +23,11 @@ TESTS_SRCFILES := \
 		  src/BitOpsTest.cc \
 		  src/BoostIntrusiveTest.cc \
 		  src/BufferTest.cc \
+		  src/CacheTraceTest.cc \
 		  src/CleanableSegmentManagerTest.cc \
 		  src/ClientExceptionTest.cc \
 		  src/ClusterMetricsTest.cc \
+		  src/CRamCloudTest.cc \
 		  src/CommonTest.cc \
 		  src/ContextTest.cc \
 		  src/CoordinatorRpcWrapperTest.cc \
@@ -43,6 +45,7 @@ TESTS_SRCFILES := \
 		  src/FastTransportTest.cc \
 		  src/HashTableTest.cc \
 		  src/HistogramTest.cc \
+		  src/IndexKeyTest.cc \
 		  src/IndexletManagerTest.cc \
 		  src/IndexLookupTest.cc \
 		  src/IndexRpcWrapperTest.cc \
