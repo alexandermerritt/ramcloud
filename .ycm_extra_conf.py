@@ -46,7 +46,7 @@ flags = [
 # No need to include -L or -l flags. Confuses YCM.
 ]
 
-SOURCE_EXTENSIONS = [ '.cc', '.h' ]
+SOURCE_EXTENSIONS = [ '.c', '.cxx', '.cpp', '.cc', '.h', '.hpp' ]
 
 # ===--------------------------------------------------------------===
 # Remainder of file copied from .ycm_extra_conf.py in YCM sources
