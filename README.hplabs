@@ -64,6 +64,25 @@ where N is the 'port' identifier above. You must choose the one which is in the
 PORT_ACTIVE state. If the port has a value of zero then you can ignore this
 variable as RAMCloud defaults to that port value when configuring the transport.
 
+---
+
+You can change the timeout maintained for RPC communication. If a response is
+not heard within some amount of time, the RPC is aborted and retried.
+
+    RAMCLOUD_ABORT_TIMEOUT=100000 # 100ms
+
+---
+
+If you see an error such as this:
+
+    src/TransportManager.cc:367 in TransportManager::openSessionInternal 
+        default WARNING[11219:1]: No supported transport found for locator
+        infrc:host=221-1,port=11100
+
+then there are probably multiple codes running on the same machine with the same
+locator configuration (perhaps consuming some shared resource which is no longer
+available?)
+
 ===== EXECUTING =====
 
 Server A: run ZooKeeper and RAMCloud coordinator
