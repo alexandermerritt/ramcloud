@@ -50,6 +50,8 @@ namespace po = boost::program_options;
 #include "Cycles.h"
 #include "Util.h"
 
+#include <pthread.h>
+
 using namespace RAMCloud;
 
 // Shared state for client library.
@@ -87,6 +89,8 @@ static int numIndexlet;
 // Value of the "--numIndexes" command-line option: used by some tests
 // to specify the number of indexes/object.
 static int numIndexes;
+
+static int numThreads;
 
 // Value of the "--warmup" command-line option: in some tests this
 // determines how many times to invoke the operation before starting
@@ -2660,6 +2664,96 @@ readLoaded()
     sendCommand("done", "done", 1, numClients-1);
 }
 
+struct threadArgs
+{
+    std::string serviceLoc;
+    std::string key;
+    uint16_t keyLength;
+    int numReads;
+    size_t cycles;
+    std::shared_ptr<pthread_barrier_t> barrier;
+
+    // stupid compiler wants an initializer list
+    threadArgs(void)
+        : serviceLoc(), key(), keyLength(0),
+        numReads(0), cycles(0), barrier(NULL)
+    { ; }
+};
+
+void *thread(void *arg)
+{
+    struct threadArgs *args = static_cast<struct threadArgs*>(arg);
+    char *key = strdup(args->key.c_str());
+    uint16_t keyLength = args->keyLength;
+    Buffer buffer;
+
+    RamCloud r(args->serviceLoc.c_str());
+    r.read(dataTable, key, // [amm] force connection to be made
+            args->keyLength, &buffer);
+
+    pthread_barrier_wait(args->barrier.get());
+
+    int i = args->numReads;
+    uint64_t tStart = Cycles::rdtsc();
+    while (i-- > 0)
+        r.read(dataTable, key, keyLength, &buffer);
+    uint64_t tEnd = Cycles::rdtsc();
+
+    args->cycles = tEnd - tStart;
+
+    free(key);
+    buffer.reset(); // [amm] reset before thread exit else segfault
+    pthread_exit(NULL);
+}
+
+void
+threadLoaded()
+{
+    std::vector<pthread_t> tids(numThreads);
+    std::vector<struct threadArgs> args(numThreads);
+    std::shared_ptr<pthread_barrier_t> barrier(new pthread_barrier_t);
+    std::string key("25l4kj52l34kj52l34kj5l2k34j5l2");
+    uint16_t keyLength = downCast<uint16_t>(key.length());
+    int idx;
+
+    Buffer input;
+    fillBuffer(input, objectSize, dataTable, key.c_str(), keyLength);
+    cluster->write(dataTable, key.c_str(), keyLength,
+            input.getRange(0,objectSize), objectSize);
+    input.reset();
+
+    pthread_barrier_init(barrier.get(), NULL, numThreads);
+    bool oops = false;
+    for (auto &arg : args) {
+        arg.serviceLoc = *(cluster->getServiceLocator());
+        arg.key        = key;
+        arg.keyLength  = keyLength;
+        arg.numReads   = count;
+        arg.barrier    = barrier;
+    }
+
+    for (idx = 0; idx < numThreads && !oops; idx++) {
+        if (pthread_create(&tids[idx], NULL, thread, &args[idx])) {
+            RAMCLOUD_LOG(ERROR, "failed to launch thread");
+            oops = true;
+        }
+    }
+    if (oops) {
+        while (--idx > 0) {
+            pthread_cancel(tids[idx]);
+        }
+        return;
+    }
+
+    std::cout << "num_reads usec" << std::endl;
+    for (idx = 0; idx < numThreads; idx++) {
+        pthread_join(tids[idx], NULL);
+        std::cout << args[idx].numReads
+            << " " << Cycles::toMicroseconds(args[idx].cycles)
+            << std::endl;
+    }
+}
+
 // Read an object that doesn't exist. This excercises some exception paths that
 // are supposed to be fast. This comes up, for example, in workloads in which a
 // RAMCloud is used as a cache with frequent cache misses.
@@ -3008,6 +3102,7 @@ TestInfo tests[] = {
     {"readNotFound", readNotFound},
     {"readRandom", readRandom},
     {"readVaryingKeyLength", readVaryingKeyLength},
+    {"threadLoaded", threadLoaded},
     {"writeVaryingKeyLength", writeVaryingKeyLength},
     {"writeAsyncSync", writeAsyncSync},
 };
@@ -3045,6 +3140,8 @@ try
                 "Size of objects (in bytes) to use for test")
         ("numTables", po::value<int>(&numTables)->default_value(10),
                 "Number of tables to use for test")
+        ("numThreads", po::value<int>(&numThreads)->default_value(1),
+                "Number of threads to use for test")
         ("testName", po::value<vector<string>>(&testNames),
                 "Name(s) of test(s) to run")
         ("warmup", po::value<int>(&warmupCount)->default_value(100),
