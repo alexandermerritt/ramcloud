@@ -23,3 +23,5 @@ TAGS
 tags
 cscope.out
 cscope.files
+
+.nfs*
