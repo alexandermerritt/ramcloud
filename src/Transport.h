@@ -173,7 +173,7 @@ class Transport {
         Session()
             : refCount(0) , serviceLocator() {}
         virtual ~Session() {
-            assert(refCount == 0);
+            assert(refCount == 0); // XXX does this cause issues?
         }
 
         /**
