@@ -13,7 +13,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include "Common.h"
 #include "IndexletManager.h"
 #include "StringUtil.h"
 #include "Util.h"
@@ -33,15 +32,14 @@ IndexletManager::IndexletManager(Context* context, ObjectManager* objectManager)
 ///////////////////////////////////////////////////////////////////////////////
 
 /**
- * Add and initialize an index partition (indexlet) on this index server.
+ * Add an indexlet (index partition) on this server.
  *
  * \param tableId
- *      Id of the data table for which this indexlet stores some
- *      index information.
+ *      Id for a particular table.
  * \param indexId
- *      Id of the index key for which this indexlet stores some information.
+ *      Id for a particular secondary index associated with tableId.
  * \param indexletTableId
- *      Id of the table that will hold objects for this indexlet
+ *      Id of the backing table that will hold objects for this indexlet.
  * \param firstKey
  *      Key blob marking the start of the indexed key range for this indexlet.
  * \param firstKeyLength
@@ -52,15 +50,16 @@ IndexletManager::IndexletManager(Context* context, ObjectManager* objectManager)
  * \param firstNotOwnedKeyLength
  *      Length of firstNotOwnedKey.
  * \param highestUsedId
- *      The highest BTree Id that has been used in the indexletTable.
- *      If highestUsedId equals zero, it means the Btree should be an empty
- *      new tree.
- * \return
- *      Returns true if successfully added, or if the indexlet already existed
- *      (and was not added right now); false if the indexlet cannot be
- *      added because it overlaps with one or more existing indexlets.
+ *      The highest node id that has been used for any node in the BTree
+ *      corresponding to this indexlet. This is used to ensure that we don't
+ *      reuse existing node ids after crash recovery.
+ *      Should be 0 for a new indexlet.
+ * 
+ * \throw InternalError
+ *      If indexlet cannot be added because the range overlaps with one or more
+ *      existing indexlets.
  */
-bool
+void
 IndexletManager::addIndexlet(
         uint64_t tableId, uint8_t indexId, uint64_t indexletTableId,
         const void *firstKey, uint16_t firstKeyLength,
@@ -69,77 +68,37 @@ IndexletManager::addIndexlet(
 {
     Lock indexletMapLock(mutex);
 
-    if (lookupIndexlet(tableId, indexId, firstKey, firstKeyLength,
-                       indexletMapLock) != indexletMap.end()) {
-        return false;
+    IndexletMap::iterator it = getIndexlet(tableId, indexId,
+            firstKey, firstKeyLength, firstNotOwnedKey, firstNotOwnedKeyLength,
+            indexletMapLock);
+
+    if (it != indexletMap.end()) {
+        // This indexlet already exists.
+        LOG(NOTICE, "Adding indexlet in tableId %lu indexId %u, "
+                "but already own. Returning success.", tableId, indexId);
+
+    } else {
+        // Add a new indexlet.
+        Btree *bt;
+        if (highestUsedId == 0)
+            bt = new Btree(indexletTableId, objectManager);
+        else
+            bt = new Btree(indexletTableId, objectManager, highestUsedId);
+
+        indexletMap.insert(std::make_pair(TableAndIndexId{tableId, indexId},
+                Indexlet(firstKey, firstKeyLength, firstNotOwnedKey,
+                        firstNotOwnedKeyLength, bt)));
     }
-
-    Btree *bt;
-    if (highestUsedId == 0)
-        bt = new Btree(indexletTableId, objectManager);
-    else
-        bt = new Btree(indexletTableId, objectManager, highestUsedId);
-
-    indexletMap.insert(std::make_pair(std::make_pair(tableId, indexId),
-                       Indexlet(firstKey, firstKeyLength, firstNotOwnedKey,
-                                firstNotOwnedKeyLength, bt)));
-    return true;
 }
 
 /**
- * Add and initialize an index partition (indexlet) on this index server.
- *
- * \param indexlet
- *      Protocol buffer contains necessary indexlet information to construct
- *      a new indexlet.
- * \param highestUsedId
- *      The highest BTree Id that has been used in the indexletTable, which
- *      is a BTree.
- * \return
- *      Returns true if successfully added, false if the indexlet cannot be
- *      added because it overlaps with one or more existing indexlets.
- */
-bool
-IndexletManager::addIndexlet(ProtoBuf::Indexlets::Indexlet indexlet,
-        uint64_t highestUsedId)
-{
-    uint64_t tableId = indexlet.table_id();
-    uint8_t indexId = (uint8_t) indexlet.index_id();
-    uint64_t indexletTableId = indexlet.indexlet_table_id();
-
-    void *firstKey, *firstNotOwnedKey;
-    uint16_t firstKeyLength, firstNotOwnedKeyLength;
-
-    if (indexlet.start_key().compare("") != 0) {
-        firstKey = const_cast<char *>(indexlet.start_key().c_str());
-        firstKeyLength = (uint16_t)indexlet.start_key().length();
-    } else {
-        firstKey = NULL;
-        firstKeyLength = 0;
-    }
-
-    if (indexlet.end_key().compare("") != 0) {
-        firstNotOwnedKey = const_cast<char *>(indexlet.end_key().c_str());
-        firstNotOwnedKeyLength = (uint16_t)indexlet.end_key().length();
-    } else {
-        firstNotOwnedKey = NULL;
-        firstNotOwnedKeyLength = 0;
-    }
-    return addIndexlet(tableId, indexId, indexletTableId,
-                       firstKey, firstKeyLength,
-                       firstNotOwnedKey, firstNotOwnedKeyLength,
-                       highestUsedId);
-}
-
-/**
- * Delete entries for an index partition (indexlet) on this index server. We can
- * have multiple indexlets for a table and an index stored on the same server.
+ * Delete an indexlet (stored on this server) and the entries stored in
+ * that indexlet.
  *
  * \param tableId
- *      Id of the data table for which this indexlet stores some
- *      index information.
+ *      Id for a particular table.
  * \param indexId
- *      Id of the index key for which this indexlet stores some information.
+ *      Id for a particular secondary index associated with tableId.
  * \param firstKey
  *      Key blob marking the start of the indexed key range for this indexlet.
  * \param firstKeyLength
@@ -149,10 +108,12 @@ IndexletManager::addIndexlet(ProtoBuf::Indexlets::Indexlet indexlet,
  *      in the index order but not part of this indexlet.
  * \param firstNotOwnedKeyLength
  *      Length of firstNotOwnedKey.
- * \return
- *      True if indexlet was deleted. Failed if indexlet did not exist.
+ * 
+ * \throw InternalError
+ *      If indexlet was not found because the range overlaps
+ *      with one or more existing indexlets.
  */
-bool
+void
 IndexletManager::deleteIndexlet(
         uint64_t tableId, uint8_t indexId,
         const void *firstKey, uint16_t firstKeyLength,
@@ -160,83 +121,33 @@ IndexletManager::deleteIndexlet(
 {
     Lock indexletMapLock(mutex);
 
-    // TODO(ashgup): This function can be simplified by using getIndexlet.
-    // However, you'll still need to take the lock here and pass it on --
-    // this may call for another lower level version of getIndexlet that takes
-    // in a lock. The higher level getIndexlet() and this function can use that.
+    IndexletMap::iterator it = getIndexlet(tableId, indexId,
+            firstKey, firstKeyLength, firstNotOwnedKey, firstNotOwnedKeyLength,
+            indexletMapLock);
 
-    IndexletMap::iterator it = lookupIndexlet(tableId, indexId,
-                                              firstKey, firstKeyLength,
-                                              indexletMapLock);
     if (it == indexletMap.end()) {
-        return false;
+        RAMCLOUD_LOG(DEBUG, "Unknown indexlet in tableId %lu, indexId %u",
+                tableId, indexId);
+    } else {
+        delete (&it->second)->bt;
+        indexletMap.erase(it);
     }
-
-    Indexlet* indexlet = &it->second;
-
-    if (IndexKey::keyCompare(indexlet->firstKey, indexlet->firstKeyLength,
-                   firstKey, firstKeyLength) != 0  ||
-        IndexKey::keyCompare(indexlet->firstNotOwnedKey,
-                   indexlet->firstNotOwnedKeyLength,
-                   firstNotOwnedKey, firstNotOwnedKeyLength) != 0) {
-        return false;
-    }
-
-    delete indexlet->bt;
-    indexletMap.erase(it);
-
-    return true;
 }
 
 /**
- * Delete entries for an index partition (indexlet) on this index server. We can
- * have multiple indexlets for a table and an index stored on the same server.
- *
- * \param indexlet
- *      Protocol buffer contains information of an indexlet that is to be
- *      deleted.
- * \return
- *      True if indexlet was deleted. Failed if indexlet did not exist.
- */
-bool
-IndexletManager::deleteIndexlet(ProtoBuf::Indexlets::Indexlet indexlet)
-{
-    uint64_t tableId = indexlet.table_id();
-    uint8_t indexId = (uint8_t) indexlet.index_id();
-    void *firstKey, *firstNotOwnedKey;
-    uint16_t firstKeyLength, firstNotOwnedKeyLength;
-    if (indexlet.start_key().compare("") != 0) {
-        firstKey = const_cast<char *>(indexlet.start_key().c_str());
-        firstKeyLength = (uint16_t)indexlet.start_key().length();
-    } else {
-        firstKey = NULL;
-        firstKeyLength = 0;
-    }
-
-    if (indexlet.end_key().compare("") != 0) {
-        firstNotOwnedKey = const_cast<char *>(indexlet.end_key().c_str());
-        firstNotOwnedKeyLength =(uint16_t)indexlet.end_key().length();
-    } else {
-        firstNotOwnedKey = NULL;
-        firstNotOwnedKeyLength = 0;
-    }
-    return deleteIndexlet(tableId, indexId, firstKey, firstKeyLength,
-                          firstNotOwnedKey, firstNotOwnedKeyLength);
-}
-
-/**
- * Given a secondary key in an indexlet range, find the indexlet.  This is used
- * to determine whether the indexlet is owned by this IndexletManager.
+ * Given a secondary key find the indexlet that contains it.
+ * This function is used to determine whether the indexlet is owned by this
+ * instance of IndexletManager.
  *
  * \param tableId
- *      Id of the data table for which this indexlet stores some
- *      index information.
+ *      Id for a particular table.
  * \param indexId
- *      Id of the index key for which this indexlet stores some information.
+ *      Id for a particular secondary index associated with tableId.
  * \param key
- *      Key blob contained to be found in the target indexlet.
+ *      The secondary index key used to find a particular indexlet.
  * \param keyLength
  *      Length of key blob.
+ * 
  * \return
  *      True if a indexlet was found, otherwise false.
  */
@@ -255,16 +166,15 @@ IndexletManager::hasIndexlet(uint64_t tableId, uint8_t indexId,
 }
 
 /**
- * Given the exact specification of a indexlet's range , obtain the current data
+ * Given the exact specification of a indexlet's range, obtain the current data
  * associated with that indexlet, if it exists. Note that the data returned is a
  * snapshot. The IndexletManager's data may be modified at any time by other
  * threads.
  *
  * \param tableId
- *      Id of the data table for which this indexlet stores some
- *      index information.
+ *      Id for a particular table.
  * \param indexId
- *      Id of the index key for which this indexlet stores some information.
+ *      Id for a particular secondary index associated with tableId.
  * \param firstKey
  *      Key blob marking the start of the indexed key range for this indexlet.
  * \param firstKeyLength
@@ -274,16 +184,23 @@ IndexletManager::hasIndexlet(uint64_t tableId, uint8_t indexId,
  *      in the index order but not part of this indexlet.
  * \param firstNotOwnedKeyLength
  *      Length of firstNotOwnedKey.
+ * \param indexletMapLock
+ *      This ensures that the caller holds this lock.
+ * 
  * \return
- *      True if a indexlet was found, otherwise false.
+ *      An iterator to the indexlet if the specified indexlet was found,
+ *      indexletMap.end() if no such indexlet could be found.
+ * 
+ * \throw InternalError
+ *      If indexlet was not found because the range overlaps
+ *      with one or more existing indexlets.
  */
-IndexletManager::Indexlet*
+IndexletManager::IndexletMap::iterator
 IndexletManager::getIndexlet(uint64_t tableId, uint8_t indexId,
         const void *firstKey, uint16_t firstKeyLength,
-        const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength)
+        const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength,
+        Lock& indexletMapLock)
 {
-    Lock indexletMapLock(mutex);
-
     // TODO(ashgup): This function seems somewhat inefficient because
     // lookupIndexlet() does comparisons on first and firstNotOwned keys
     // and then we do it again here. Instead you can iterate over all the
@@ -291,67 +208,68 @@ IndexletManager::getIndexlet(uint64_t tableId, uint8_t indexId,
     // lookupIndexlet().
 
     IndexletMap::iterator it = lookupIndexlet(tableId, indexId,
-                                              firstKey, firstKeyLength,
-                                              indexletMapLock);
+            firstKey, firstKeyLength, indexletMapLock);
     if (it == indexletMap.end())
-        return NULL;
+        return it;
 
     Indexlet* indexlet = &it->second;
 
     if (IndexKey::keyCompare(indexlet->firstKey, indexlet->firstKeyLength,
-                   firstKey, firstKeyLength) != 0  ||
+                firstKey, firstKeyLength) != 0  ||
         IndexKey::keyCompare(indexlet->firstNotOwnedKey,
-                   indexlet->firstNotOwnedKeyLength,
-                   firstNotOwnedKey, firstNotOwnedKeyLength) != 0) {
-        return NULL;
+                indexlet->firstNotOwnedKeyLength,
+                firstNotOwnedKey, firstNotOwnedKeyLength) != 0) {
+
+        RAMCLOUD_LOG(ERROR, "Given indexlet in tableId %lu, indexId %u "
+                "overlaps with one or more other ranges.", tableId, indexId);
+        throw InternalError(HERE, STATUS_INTERNAL_ERROR);
     }
 
-    return indexlet;
+    return it;
 }
 
 /**
- * Helper for the public methods that need to look up a indexlet. This method
- * iterates over all candidates in the multimap.
+ * Given an index key, find the indexlet containing that entry.
+ * This is a helper for the public methods that need to look up a indexlet.
  *
  * \param tableId
- *      Id of the data table for which this indexlet stores some
- *      index information.
+ *      Id for a particular table.
  * \param indexId
- *      Id of the index key for which this indexlet stores some information.
+ *      Id for a particular secondary index associated with tableId.
  * \param key
- *      Key blob marking the start of the indexed key range for this indexlet.
+ *      The secondary index key used to find a particular indexlet.
  * \param keyLength
- *      Length of firstKeyStr.
- * \param mutex
- *      Lock from parent function to protect the indexletMap
- *      from concurrent access.
+ *      Length of key.
+ * \param indexletMapLock
+ *      This ensures that the caller holds this lock.
  * \return
- *      A IndexletMap::iterator is returned. If no indexlet was found, it will
- *      be equal to indexletMap.end(). Otherwise, it will refer to the desired
- *      indexlet.
+ *      An iterator to the indexlet for index indexId for table tableId
+ *      that contains key, or indexletMap.end() if no such indexlet could be
+ *      found.
  *
  *      An iterator, rather than a Indexlet pointer is returned to facilitate
  *      efficient deletion.
  */
 IndexletManager::IndexletMap::iterator
 IndexletManager::lookupIndexlet(uint64_t tableId, uint8_t indexId,
-        const void *key, uint16_t keyLength, Lock& mutex)
+        const void *key, uint16_t keyLength, Lock& indexletMapLock)
 {
-    auto range = indexletMap.equal_range(std::make_pair(tableId, indexId));
+    // Must iterate over all of the local indexlets for the given index.
+    auto range = indexletMap.equal_range(TableAndIndexId {tableId, indexId});
     IndexletMap::iterator end = range.second;
 
     for (IndexletMap::iterator it = range.first; it != end; it++) {
 
         Indexlet* indexlet = &it->second;
         if (IndexKey::keyCompare(key, keyLength,
-                       indexlet->firstKey, indexlet->firstKeyLength) < 0) {
+                indexlet->firstKey, indexlet->firstKeyLength) < 0) {
             continue;
         }
 
         if (indexlet->firstNotOwnedKey != NULL) {
             if (IndexKey::keyCompare(key, keyLength,
-                           indexlet->firstNotOwnedKey,
-                           indexlet->firstNotOwnedKeyLength) >= 0) {
+                    indexlet->firstNotOwnedKey,
+                    indexlet->firstNotOwnedKeyLength) >= 0) {
                 continue;
             }
         }
@@ -367,7 +285,7 @@ IndexletManager::lookupIndexlet(uint64_t tableId, uint8_t indexId,
   *     Total number of indexlets this object is managing.
   */
 size_t
-IndexletManager::getCount()
+IndexletManager::getNumIndexlets()
 {
     Lock indexletMapLock(mutex);
     return indexletMap.size();
@@ -381,9 +299,9 @@ IndexletManager::getCount()
  * Insert index entry for an object for a given index id.
  *
  * \param tableId
- *      Id of the table containing the object corresponding to this index entry.
+ *      Id for a particular table.
  * \param indexId
- *      Id of the index to which this index key belongs.
+ *      Id for a particular secondary index associated with tableId.
  * \param key
  *      Key blob for for the index entry.
  * \param keyLength
@@ -408,8 +326,8 @@ IndexletManager::insertEntry(uint64_t tableId, uint8_t indexId,
             lookupIndexlet(tableId, indexId, key, keyLength, indexletMapLock);
     if (it == indexletMap.end()) {
         RAMCLOUD_LOG(DEBUG, "Unknown indexlet: tableId %lu, indexId %u, "
-                        "hash %lu,\nkey: %s", tableId, indexId, pKHash,
-                        Util::hexDump(key, keyLength).c_str());
+                            "hash %lu,\nkey: %s", tableId, indexId, pKHash,
+                            Util::hexDump(key, keyLength).c_str());
         return STATUS_UNKNOWN_INDEXLET;
     }
     Indexlet* indexlet = &it->second;
@@ -424,80 +342,38 @@ IndexletManager::insertEntry(uint64_t tableId, uint8_t indexId,
 }
 
 /**
- * Lookup objects with index keys corresponding to indexId in the
- * specified range.
- *
- * \param tableId
- *      Id of the table containing the objects corresponding to these
- *      index keys.
- * \param indexId
- *      Id of the index to which these index keys belongs.
- * \param firstKey
- *      Starting key blob for the key range in which keys are to be matched.
- *      The key range includes the firstKey.
- * \param firstKeyLength
- *      Length of firstKey.
- * \param firstAllowedKeyHash
- *      Smallest primary key hash value allowed for firstKey.
- * \param lastKey
- *      Ending key for the key range in which keys are to be matched.
- *      The key range includes the lastKey.
- * \param lastKeyLength
- *      Length of lastKey.
- * \param maxNumHashes
- *      Maximum number of key hashes that can be returned as a response here.
- *      If there are more hashes to be returned than maxNumHashes, then
- *      information about the next key + keyHash to be fetched is also returned.
- *
- * \param[out] responseBuffer
- *      Return buffer containing the following:
- *      1. Actual bytes of the next key to fetch (nextKey), if any.
- *      Indicates that results for index keys starting at nextKey + nextKeyHash
- *      couldn't be returned right now, possibly because we ran out of space
- *      in the response rpc.
- *      Client can send another request to get results starting at nexKey +
- *      nextKeyHash.
- *      This part occupies the first nextKeyLength bytes of responseBuffer.
- *      2. The key hashes of the primary keys of all the objects
- *      that match the lookup query and can be returned in this response.
- *      This part occupies numHashes * sizeof(KeyHash) bytes of responseBuffer.
- * \param[out] numHashes
- *      Return the number of objects that matched the lookup, for which
- *      the primary key hashes are being returned here.
- * \param[out] nextKeyLength
- *      Length of nextKey in bytes.
- * \param[out] nextKeyHash
- *      Results starting at nextKey + nextKeyHash couldn't be returned.
- *      Client can send another request according to this.
- * \return
- *      Returns STATUS_OK if the lookup succeeded. Other status values
- *      indicate different failures.
+ * Handle LOOKUP_INDEX_KEYS request.
+ * 
+ * \copydetails Service::ping
  */
-Status
-IndexletManager::lookupIndexKeys(uint64_t tableId, uint8_t indexId,
-        const void* firstKey, KeyLength firstKeyLength,
-        uint64_t firstAllowedKeyHash,
-        const void* lastKey, uint16_t lastKeyLength,
-        uint32_t maxNumHashes, Buffer* responseBuffer, uint32_t* numHashes,
-        uint16_t* nextKeyLength, uint64_t* nextKeyHash)
+void
+IndexletManager::lookupIndexKeys(
+        const WireFormat::LookupIndexKeys::Request* reqHdr,
+        WireFormat::LookupIndexKeys::Response* respHdr,
+        Service::Rpc* rpc)
 {
     Lock indexletMapLock(mutex);
 
+    uint32_t reqOffset = sizeof32(*reqHdr);
+    const void* firstKey =
+            rpc->requestPayload->getRange(reqOffset, reqHdr->firstKeyLength);
+    reqOffset += reqHdr->firstKeyLength;
+    const void* lastKey =
+            rpc->requestPayload->getRange(reqOffset, reqHdr->lastKeyLength);
+
     RAMCLOUD_LOG(DEBUG, "Looking up: tableId %lu, indexId %u.\n"
                         "first key: %s\n last  key: %s\n",
-                        tableId, indexId,
-                        Util::hexDump(firstKey, firstKeyLength).c_str(),
-                        Util::hexDump(lastKey, lastKeyLength).c_str());
+                        reqHdr->tableId, reqHdr->indexId,
+                        Util::hexDump(firstKey, reqHdr->firstKeyLength).c_str(),
+                        Util::hexDump(lastKey, reqHdr->lastKeyLength).c_str());
 
     IndexletMap::iterator mapIter =
-            lookupIndexlet(tableId, indexId, firstKey, firstKeyLength,
-                           indexletMapLock);
-    if (mapIter == indexletMap.end())
-        return STATUS_UNKNOWN_INDEXLET;
+            lookupIndexlet(reqHdr->tableId, reqHdr->indexId, firstKey,
+                           reqHdr->firstKeyLength, indexletMapLock);
+    if (mapIter == indexletMap.end()) {
+        respHdr->common.status = STATUS_UNKNOWN_INDEXLET;
+    }
     Indexlet* indexlet = &mapIter->second;
-
-    *numHashes = 0;
-    *nextKeyLength = 0;
 
     Lock indexletLock(indexlet->indexletMutex);
     indexletMapLock.unlock();
@@ -511,8 +387,8 @@ IndexletManager::lookupIndexKeys(uint64_t tableId, uint8_t indexId,
 
     // We want to use lower_bound() instead of find() because the firstKey
     // may not correspond to a key in the indexlet.
-    auto iter = indexlet->bt->lower_bound(
-                    KeyAndHash {firstKey, firstKeyLength, firstAllowedKeyHash});
+    auto iter = indexlet->bt->lower_bound(KeyAndHash {
+            firstKey, reqHdr->firstKeyLength, reqHdr->firstAllowedKeyHash});
 
     auto iterEnd = indexlet->bt->end();
     bool rpcMaxedOut = false;
@@ -526,51 +402,60 @@ IndexletManager::lookupIndexKeys(uint64_t tableId, uint8_t indexId,
     // If iter == iterEnd, calling iter.key() is wrong because we will
     // then try to read an object that definitely does not exist.
     // This will cause a crash in the tree module
+
+    respHdr->numHashes = 0;
+
     while (iter != iterEnd &&
-           IndexKey::keyCompare(lastKey, lastKeyLength,
+           IndexKey::keyCompare(lastKey, reqHdr->lastKeyLength,
                         iter.key().key, iter.key().keyLength) >= 0) {
 
-        if (*numHashes < maxNumHashes) {
+        if (respHdr->numHashes < reqHdr->maxNumHashes) {
             // Can alternatively use iter.data() instead of iter.key().pKHash,
             // but we might want to make data NULL in the future, so might
             // as well use the pKHash from key right away.
-            responseBuffer->emplaceAppend<uint64_t>(iter.key().pKHash);
-            *numHashes += 1;
+            rpc->replyPayload->emplaceAppend<uint64_t>(iter.key().pKHash);
+            respHdr->numHashes += 1;
             ++iter;
         } else {
             rpcMaxedOut = true;
             break;
         }
+
     }
 
     if (rpcMaxedOut) {
-        *nextKeyLength = uint16_t(iter.key().keyLength);
-        *nextKeyHash = iter.data();
-        responseBuffer->appendExternal(iter.key().key,
-                        uint32_t(iter.key().keyLength));
-    } else if (IndexKey::keyCompare(
-                        lastKey, lastKeyLength, indexlet->firstNotOwnedKey,
-                        indexlet->firstNotOwnedKeyLength) > 0) {
 
-        *nextKeyLength = indexlet->firstNotOwnedKeyLength;
-        *nextKeyHash = 0;
-        responseBuffer->appendExternal(indexlet->firstNotOwnedKey,
-                                       indexlet->firstNotOwnedKeyLength);
+        respHdr->nextKeyLength = uint16_t(iter.key().keyLength);
+        respHdr->nextKeyHash = iter.data();
+        rpc->replyPayload->appendExternal(iter.key().key,
+                uint32_t(iter.key().keyLength));
+
+    } else if (IndexKey::keyCompare(
+            lastKey, reqHdr->lastKeyLength,
+            indexlet->firstNotOwnedKey, indexlet->firstNotOwnedKeyLength) > 0) {
+
+        respHdr->nextKeyLength = indexlet->firstNotOwnedKeyLength;
+        respHdr->nextKeyHash = 0;
+        rpc->replyPayload->appendExternal(indexlet->firstNotOwnedKey,
+                indexlet->firstNotOwnedKeyLength);
+
     } else {
-        *nextKeyHash = 0;
-        *nextKeyLength = 0;
+
+        respHdr->nextKeyHash = 0;
+        respHdr->nextKeyLength = 0;
+
     }
 
-    return STATUS_OK;
+    respHdr->common.status = STATUS_OK;
 }
 
 /**
  * Remove index entry for an object for a given index id.
  *
  * \param tableId
- *      Id of the table containing the object corresponding to this index entry.
+ *      Id for a particular table.
  * \param indexId
- *      Id of the index to which this index key belongs.
+ *      Id for a particular secondary index associated with tableId.
  * \param key
  *      Key blob for for the index entry.
  * \param keyLength
@@ -578,7 +463,8 @@ IndexletManager::lookupIndexKeys(uint64_t tableId, uint8_t indexId,
  * \param pKHash
  *      Hash of the primary key of the object.
  * \return
- *      Returns STATUS_OK if the remove succeeded.
+ *      Returns STATUS_OK if the remove succeeded or if the entry did not
+ *      exist.
  *      Returns STATUS_UNKNOWN_INDEXLET if the server does not own an indexlet
  *      containing this index entry.
  */
@@ -604,18 +490,8 @@ IndexletManager::removeEntry(uint64_t tableId, uint8_t indexId,
 
     // Note that we don't have to explicitly compare the key hash in value
     // since it is also a part of the key that gets compared in the tree
-    // module
-    if (indexlet->bt->erase_one(KeyAndHash {key, keyLength, pKHash})) {
-        RAMCLOUD_LOG(DEBUG, "remove succeed: tableId %lu, indexId %u, key: %s",
-                    tableId, indexId, Util::hexDump(key, keyLength).c_str());
-
-        return STATUS_OK;
-    }
-
-    // code should not reach here ideally but if it does, we ignore it because
-    // we allow for garbage in the indexlet
-    RAMCLOUD_LOG(DEBUG, "remove failed: tableId %lu, indexId %u, key: %s",
-                    tableId, indexId, Util::hexDump(key, keyLength).c_str());
+    // module.
+    indexlet->bt->erase_one(KeyAndHash {key, keyLength, pKHash});
 
     return STATUS_OK;
 }

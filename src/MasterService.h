@@ -52,12 +52,10 @@ class RecoveryTask;
  */
 class MasterService : public Service {
   public:
-    MasterService(Context* context,
-                  const ServerConfig* config);
+    MasterService(Context* context, const ServerConfig* config);
     virtual ~MasterService();
 
-    void dispatch(WireFormat::Opcode opcode,
-                  Rpc* rpc);
+    void dispatch(WireFormat::Opcode opcode, Rpc* rpc);
     int maxThreads() { return config->master.masterServiceThreadCount; }
 
     /*
@@ -108,6 +106,18 @@ class MasterService : public Service {
      */
     IndexletManager indexletManager;
 
+#ifdef TESTING
+    /// Used to pause the read-increment-write cycle in incrementObject
+    /// between the read and the write.  While paused, a second thread can
+    /// run a full read-increment-write cycle forcing the first thread to
+    /// fail on the conditional write and to retry the cycle.
+    static volatile int pauseIncrement;
+
+    /// Used by to indicate to a paused thread that it may finish the
+    /// increment operation.
+    static volatile int continueIncrement;
+#endif
+
   PRIVATE:
     void dropTabletOwnership(
                 const WireFormat::DropTabletOwnership::Request* reqHdr,
@@ -136,6 +146,12 @@ class MasterService : public Service {
     void increment(const WireFormat::Increment::Request* reqHdr,
                 WireFormat::Increment::Response* respHdr,
                 Rpc* rpc);
+    void incrementObject(Key *key,
+                RejectRules rejectRules,
+                int64_t *asInt64,
+                double *asDouble,
+                uint64_t *newVersion,
+                Status *status);
     void indexedRead(
                 const WireFormat::IndexedRead::Request* reqHdr,
                 WireFormat::IndexedRead::Response* respHdr,
@@ -156,6 +172,9 @@ class MasterService : public Service {
     void multiOp(const WireFormat::MultiOp::Request* reqHdr,
                 WireFormat::MultiOp::Response* respHdr,
                 Rpc* rpc);
+    void multiIncrement(const WireFormat::MultiOp::Request* reqHdr,
+                WireFormat::MultiOp::Response* respHdr,
+                Rpc* rpc);
     void multiRead(const WireFormat::MultiOp::Request* reqHdr,
                 WireFormat::MultiOp::Response* respHdr,
                 Rpc* rpc);
@@ -163,8 +182,8 @@ class MasterService : public Service {
                 WireFormat::MultiOp::Response* respHdr,
                 Rpc* rpc);
     void multiWrite(const WireFormat::MultiOp::Request* reqHdr,
-                   WireFormat::MultiOp::Response* respHdr,
-                   Rpc* rpc);
+                WireFormat::MultiOp::Response* respHdr,
+                Rpc* rpc);
     void prepForMigration(const WireFormat::PrepForMigration::Request* reqHdr,
                 WireFormat::PrepForMigration::Response* respHdr,
                 Rpc* rpc);
@@ -172,8 +191,8 @@ class MasterService : public Service {
                 WireFormat::Read::Response* respHdr,
                 Rpc* rpc);
     void readKeysAndValue(const WireFormat::ReadKeysAndValue::Request* reqHdr,
-              WireFormat::ReadKeysAndValue::Response* respHdr,
-              Rpc* rpc);
+                WireFormat::ReadKeysAndValue::Response* respHdr,
+                Rpc* rpc);
     void receiveMigrationData(
                 const WireFormat::ReceiveMigrationData::Request* reqHdr,
                 WireFormat::ReceiveMigrationData::Response* respHdr,
@@ -287,7 +306,7 @@ class MasterService : public Service {
 
     friend void recoveryCleanup(uint64_t maybeTomb, void *cookie);
     friend void removeObjectIfFromUnknownTablet(uint64_t reference,
-                                                void *cookie);
+                void *cookie);
     friend class RecoverSegmentBenchmark;
     friend class MasterServiceInternal::RecoveryTask;
 

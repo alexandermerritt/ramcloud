@@ -20,6 +20,7 @@
 #include "MasterService.h"
 #include "RawMetrics.h"
 #include "ShortMacros.h"
+#include "PerfStats.h"
 #include "PingClient.h"
 #include "PingService.h"
 #include "ServerList.h"
@@ -269,6 +270,24 @@ PingService::serverControl(const WireFormat::ServerControl::Request* reqHdr,
         case WireFormat::LOG_CACHE_TRACE:
         {
             context->cacheTrace->printToLog();
+            break;
+        }
+        case WireFormat::GET_PERF_STATS:
+        {
+            PerfStats stats;
+            PerfStats::collectStats(&stats);
+            respHdr->outputLength = sizeof32(stats);
+            rpc->replyPayload->appendCopy(&stats, respHdr->outputLength);
+            break;
+        }
+        case WireFormat::START_PERF_COUNTERS:
+        {
+            Perf::EnabledCounter::enabled = true;
+            break;
+        }
+        case WireFormat::STOP_PERF_COUNTERS:
+        {
+            Perf::EnabledCounter::enabled = false;
             break;
         }
         default:

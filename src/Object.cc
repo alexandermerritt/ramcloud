@@ -41,8 +41,9 @@ namespace RAMCloud {
  * \param startDataOffset
  *      Byte offset in the buffer where keysAndValue start
  * \param length
- *      Length of keysAndValue. If 0, then this constructor computes it as
- *      keysAndValueBuffer.size() - startDataOffset.
+ *      Length of keysAndValue.
+ *      A length of 0 means that the object occupies the entire buffer
+ *      starting at offset.
  *      This is primarily used by the multiWrite RPC in MasterService.
  */
 Object::Object(uint64_t tableId,
@@ -65,6 +66,10 @@ Object::Object(uint64_t tableId,
         length = this->keysAndValueBuffer->size() - startDataOffset;
 
     keysAndValueLength = length;
+
+    void* retPtr;
+    if (keysAndValueBuffer.peek(startDataOffset, &retPtr) >= keysAndValueLength)
+        keysAndValue = static_cast<char*>(retPtr);
 }
 
 /**
@@ -150,6 +155,8 @@ Object::Object(Key& key,
  *      Starting offset in the buffer where the object begins.
  * \param length
  *      Total length of the object in bytes.
+ *      A length of 0 means that the object occupies the entire buffer
+ *      starting at offset.
  */
 Object::Object(Buffer& buffer, uint32_t offset, uint32_t length)
     : header(*buffer.getOffset<Header>(offset)),
@@ -210,20 +217,18 @@ Object::assembleForLog(Buffer& buffer)
 }
 
 /**
- * Copy the full object, including header, keys and value exactly as it
- * should be stored in the log. This is used when the memory for an object
- * needs to be allocated in a buffer as opposed to being logically stored
- * in a buffer.
+ * Copy the full serialized tombstone including the header and the primary key
+ * to a contiguous region of memory memBlock.
  *
- * \param buffer
- *      Destination to copy a serialized version of this object to.
+ * \param memBlock
+ *      Destination to copy a serialized version of this tombstone to.
  *      The caller must ensure that sufficient memory is allocated for the
- *      complete serialized object to be stored
+ *      complete tombstone object to be stored.
  */
 void
-Object::assembleForLog(void* buffer)
+Object::assembleForLog(void* memBlock)
 {
-    uint8_t *dst = reinterpret_cast<uint8_t*>(buffer);
+    uint8_t *dst = reinterpret_cast<uint8_t*>(memBlock);
     header.checksum = computeChecksum();
 
     memcpy(dst, &header, sizeof32(header));
@@ -232,6 +237,9 @@ Object::assembleForLog(void* buffer)
 
 /**
  * Append the the value associated with this object to a provided buffer.
+ * This is a virtual copy and does not make a copy of the value.
+ * The caller must ensure that the source (of the value) remains valid
+ * as long as the buffer exists.
  *
  * \param buffer
  *      The buffer to append the value to.
@@ -239,11 +247,11 @@ Object::assembleForLog(void* buffer)
  *      Offset of the value in the keysAndValue portion of the object
  */
 void
-Object::appendValueToBuffer(Buffer& buffer, uint32_t valueOffset)
+Object::appendValueToBuffer(Buffer* buffer, uint32_t valueOffset)
 {
     if (keysAndValue) {
         const uint8_t *ptr = reinterpret_cast<const uint8_t *>(keysAndValue);
-        buffer.appendExternal(ptr + valueOffset, getValueLength());
+        buffer->appendExternal(ptr + valueOffset, getValueLength());
         return;
     }
 
@@ -252,7 +260,7 @@ Object::appendValueToBuffer(Buffer& buffer, uint32_t valueOffset)
     Buffer::Iterator it(sourceBuffer, keysAndValueOffset + valueOffset,
                         getValueLength());
     while (!it.isDone()) {
-        buffer.appendExternal(it.getData(), it.getLength());
+        buffer->appendExternal(it.getData(), it.getLength());
         it.next();
     }
 }
@@ -308,13 +316,10 @@ Object::appendKeysAndValueToBuffer(Buffer& buffer)
  *      Total length of keysAndValue
  */
 void
-Object::appendKeysAndValueToBuffer(uint64_t tableId,
-                                   KeyCount numKeys,
-                                   KeyInfo *keyList,
-                                   const void* value,
-                                   uint32_t valueLength,
-                                   Buffer& request,
-                                   uint32_t *length)
+Object::appendKeysAndValueToBuffer(
+        uint64_t tableId, KeyCount numKeys, KeyInfo *keyList,
+        const void* value, uint32_t valueLength, Buffer* request,
+        uint32_t *length)
 {
     int i;
     uint32_t totalKeyLength = 0;
@@ -323,7 +328,7 @@ Object::appendKeysAndValueToBuffer(uint64_t tableId,
         // allocate memory first for number of keys and all the cumulative
         // length values
         KeyOffsets *keyOffsetsHelper = reinterpret_cast<KeyOffsets *>(
-                                    request.alloc(KEY_INFO_LENGTH(numKeys)));
+                                    request->alloc(KEY_INFO_LENGTH(numKeys)));
         keyOffsetsHelper->numKeys = numKeys;
         CumulativeKeyLength *cumLengths = keyOffsetsHelper->cumulativeLengths;
 
@@ -351,7 +356,7 @@ Object::appendKeysAndValueToBuffer(uint64_t tableId,
                                     currentKeyLength);
             totalKeyLength += currentKeyLength;
         }
-        void *keys = request.alloc(totalKeyLength);
+        void *keys = request->alloc(totalKeyLength);
         uint8_t *dest = reinterpret_cast<uint8_t *>(keys);
         for (i = 0; i < numKeys; i++) {
             // this key doesn't exist
@@ -368,7 +373,7 @@ Object::appendKeysAndValueToBuffer(uint64_t tableId,
             memcpy(dest, keyList[i].key, currentKeyLength);
             dest = dest + currentKeyLength;
         }
-        request.appendExternal(value, valueLength);
+        request->appendExternal(value, valueLength);
         if (length)
             *length = KEY_INFO_LENGTH(numKeys) +
                       totalKeyLength + valueLength;
@@ -396,30 +401,26 @@ Object::appendKeysAndValueToBuffer(uint64_t tableId,
  */
 void
 Object::appendKeysAndValueToBuffer(
-        Key& key,
-        const void* value,
-        uint32_t valueLength,
-        Buffer& buffer,
-        uint32_t *length)
+        Key& key, const void* value, uint32_t valueLength,
+        Buffer* buffer, uint32_t *length)
 {
-    uint32_t primaryKeyInfoLength = KEY_INFO_LENGTH(1) +
-                             key.getStringKeyLength();
+    uint32_t primaryKeyInfoLength =
+            KEY_INFO_LENGTH(1) + key.getStringKeyLength();
 
     if (length)
         *length = primaryKeyInfoLength + valueLength;
 
     uint8_t* keyInfo = static_cast<uint8_t*>(
-            buffer.alloc(primaryKeyInfoLength));
+            buffer->alloc(primaryKeyInfoLength));
 
     KeyCount keyCount = 1;
-    KeyLength keyLength = static_cast<KeyLength>
-                                (key.getStringKeyLength());
+    KeyLength keyLength = static_cast<KeyLength>(key.getStringKeyLength());
     const void *keyString = key.getStringKey();
     memcpy(keyInfo, &keyCount, sizeof(KeyCount));
     memcpy(keyInfo + sizeof(KeyCount), &keyLength, sizeof(KeyLength));
     memcpy(keyInfo + KEY_INFO_LENGTH(1), keyString, keyLength);
 
-    buffer.appendExternal(value, valueLength);
+    buffer->appendExternal(value, valueLength);
 }
 
 /**
@@ -439,7 +440,7 @@ Object::fillKeyOffsets()
                                 keysAndValue);
         } else {
             KeyCount numKeys = *(keysAndValueBuffer->getOffset<KeyCount>(
-                                    keysAndValueOffset));
+                                keysAndValueOffset));
             keyOffsets = static_cast<const struct KeyOffsets *>(
                                 keysAndValueBuffer->getRange(
                                 keysAndValueOffset, KEY_INFO_LENGTH(numKeys)));
@@ -504,7 +505,7 @@ Object::getKey(KeyIndex keyIndex, KeyLength *keyLength)
         return static_cast<const uint8_t *>(keysAndValue) + keyOffset;
     else
         return keysAndValueBuffer->getRange(keyOffset + keysAndValueOffset,
-                                                length);
+                                            length);
 }
 
 /**
@@ -808,6 +809,8 @@ ObjectTombstone::ObjectTombstone(Object& object, uint64_t segmentId,
  *      Starting offset in the buffer where the tombstone begins.
  * \param length
  *      Total length of the tombstone in bytes.
+ *      A length of 0 means that the tombstone occupies the entire buffer
+ *      starting at offset.
  */
 ObjectTombstone::ObjectTombstone(Buffer& buffer, uint32_t offset,
                                  uint32_t length)
@@ -873,9 +876,8 @@ ObjectTombstone::appendKeyToBuffer(Buffer& buffer)
         return;
     }
 
-    Buffer::Iterator it(tombstoneBuffer,
-                        keyOffset,
-                        getKeyLength());
+    Buffer::Iterator it(tombstoneBuffer, keyOffset, getKeyLength());
+
     while (!it.isDone()) {
         buffer.appendExternal(it.getData(), it.getLength());
         it.next();
@@ -979,15 +981,12 @@ ObjectTombstone::computeChecksum()
         (sizeof(header) - sizeof(header.checksum)));
 
     Crc32C crc;
-    crc.update(&header,
-               downCast<uint32_t>(OFFSET_OF(Header, checksum)));
+    crc.update(&header, downCast<uint32_t>(OFFSET_OF(Header, checksum)));
 
     if (key) {
         crc.update(key, getKeyLength());
     } else {
-        crc.update(*tombstoneBuffer,
-                   keyOffset,
-                   getKeyLength());
+        crc.update(*tombstoneBuffer, keyOffset, getKeyLength());
     }
 
     return crc.getResult();
@@ -1075,8 +1074,7 @@ ObjectSafeVersion::computeChecksum()
         (sizeof(header) - sizeof(header.checksum)));
 
     Crc32C crc;
-    crc.update(&header,
-               downCast<uint32_t>(OFFSET_OF(Header, checksum)));
+    crc.update(&header, downCast<uint32_t>(OFFSET_OF(Header, checksum)));
     return crc.getResult();
 }
 

@@ -22,11 +22,13 @@
 #include "LogEntryRelocator.h"
 #include "ObjectManager.h"
 #include "Object.h"
+#include "PerfStats.h"
 #include "ShortMacros.h"
 #include "RawMetrics.h"
 #include "Tub.h"
 #include "ProtoBuf.h"
 #include "Segment.h"
+#include "TimeTrace.h"
 #include "Transport.h"
 #include "WallTime.h"
 
@@ -212,6 +214,7 @@ ObjectManager::indexedRead(const uint64_t tableId, uint32_t reqNumHashes,
                 const void* pKString = object.getKey(1, &pKLength);
                 Key pK(tableId, pKString, pKLength);
                 tabletManager->incrementReadCount(pK);
+                ++PerfStats::threadStats.readCount;
             }
 
             candidates.next();
@@ -316,10 +319,11 @@ ObjectManager::readObject(Key& key, Buffer* outBuffer,
     if (valueOnly) {
         uint16_t valueOffset = 0;
         object.getValueOffset(&valueOffset);
-        object.appendValueToBuffer(*outBuffer, valueOffset);
+        object.appendValueToBuffer(outBuffer, valueOffset);
     } else {
         object.appendKeysAndValueToBuffer(*outBuffer);
     }
+    ++PerfStats::threadStats.readCount;
 
     return STATUS_OK;
 }
@@ -959,6 +963,7 @@ ObjectManager::writeObject(Object& newObject, RejectRules* rejectRules,
         *outVersion = newObject.getVersion();
 
     tabletManager->incrementWriteCount(key);
+    ++PerfStats::threadStats.writeCount;
 
     TEST_LOG("object: %u bytes, version %lu",
         appends[0].buffer.size(), newObject.getVersion());
@@ -1238,12 +1243,12 @@ ObjectManager::prepareForLog(Object& newObject, Buffer *logBuffer,
  * into a buffer based on the primary key of the object.
  *
  * \param key
- *      Key of the object for which a tombstone needs to be written
+ *      Key of the object for which a tombstone needs to be written.
  * \param [out] logBuffer
- *      Buffer that will contain the newly written tombstone entry
+ *      Buffer that will contain the newly written tombstone entry.
  * \return
  *      the status of the operation. If the tablet is in the NORMAL
- *      state, it returns STATUS_OK
+ *      state, it returns STATUS_OK.
  */
 Status
 ObjectManager::writeTombstone(Key& key, Buffer *logBuffer)

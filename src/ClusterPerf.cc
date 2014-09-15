@@ -45,9 +45,10 @@
 namespace po = boost::program_options;
 
 #include "assert.h"
-#include "RamCloud.h"
 #include "CycleCounter.h"
 #include "Cycles.h"
+#include "PerfStats.h"
+#include "RamCloud.h"
 #include "Util.h"
 
 #include <pthread.h>
@@ -104,20 +105,6 @@ uint64_t dataTable = -1;
 // and slaves to coordinate execution of tests.
 uint64_t controlTable = -1;
 
-// The locations of objects in controlTable; each of these values is an
-// offset relative to the base for a particular client, as computed by
-// controlId.
-
-enum Id {
-    STATE =  0,                      // Current state of this client.
-    COMMAND = 1,                     // Command issued by master for
-                                     // this client.
-    DOC = 2,                         // Documentation string in master's
-                                     // regions; used in log messages.
-    METRICS = 3,                     // Statistics returned from slaves
-                                     // to masters.
-};
-
 #define MAX_METRICS 8
 
 // The following type holds metrics for all the clients.  Each inner vector
@@ -140,6 +127,9 @@ struct TimeDist {
     double bandwidth;             // Average throughput in bytes/sec., or 0
                                   // if no such measurement.
 };
+
+// Forward declarations:
+extern void readThroughputMaster(int numObjects, int size, uint16_t keyLength);
 
 //----------------------------------------------------------------------
 // Utility functions used by the test functions
@@ -649,7 +639,10 @@ timeRead(uint64_t tableId, const void* key, uint16_t keyLength,
  * \param keyLength
  *      Size in bytes of the key.
  * \param count
- *      Read the object this many times.
+ *      Read the object this many times, unless time runs out.
+ * \param timeLimit
+ *      Maximum time (in seconds) to spend on this test: if this much
+ *      time elapses, then less than count iterations will be run.
  * \param value
  *      The contents of the object will be stored here, in case
  *      the caller wants to check them.
@@ -659,17 +652,23 @@ timeRead(uint64_t tableId, const void* key, uint16_t keyLength,
  */
 TimeDist
 readDist(uint64_t tableId, const void* key, uint16_t keyLength,
-         int count, Buffer& value)
+         int count, double timeLimit, Buffer& value)
 {
     uint64_t total = 0;
     std::vector<uint64_t> times;
     times.resize(count);
+    uint64_t stopTime = Cycles::rdtsc() + Cycles::fromSeconds(timeLimit);
 
     // Read the value once just to warm up all the caches everywhere.
     cluster->read(tableId, key, keyLength, &value);
 
     for (int i = 0; i < count; i++) {
         uint64_t start = Cycles::rdtsc();
+        if (start >= stopTime) {
+            LOG(NOTICE, "time expired after %d iterations", i);
+            times.resize(i);
+            break;
+        }
         cluster->read(tableId, key, keyLength, &value);
         uint64_t interval = Cycles::rdtsc() - start;
         total += interval;
@@ -678,7 +677,7 @@ readDist(uint64_t tableId, const void* key, uint16_t keyLength,
     TimeDist result;
     getDist(times, &result);
     double totalBytes = value.size();
-    totalBytes *= count;
+    totalBytes *= downCast<int>(times.size());
     result.bandwidth = totalBytes/Cycles::toSeconds(total);
 
     return result;
@@ -700,23 +699,32 @@ readDist(uint64_t tableId, const void* key, uint16_t keyLength,
  *      Size of data at \c value.
  * \param count
  *      Write the object this many times.
+ * \param timeLimit
+ *      Maximum time (in seconds) to spend on this test: if this much
+ *      time elapses, then less than count iterations will be run.
  *
  * \return
  *      Information about how long the writes took.
  */
 TimeDist
 writeDist(uint64_t tableId, const void* key, uint16_t keyLength,
-          const void* value, uint32_t length, int count)
+          const void* value, uint32_t length, int count, double timeLimit)
 {
     uint64_t total = 0;
     std::vector<uint64_t> times;
     times.resize(count);
+    uint64_t stopTime = Cycles::rdtsc() + Cycles::fromSeconds(timeLimit);
 
     // Write the value once just to warm up all the caches everywhere.
     cluster->write(tableId, key, keyLength, value, length);
 
     for (int i = 0; i < count; i++) {
         uint64_t start = Cycles::rdtsc();
+        if (start >= stopTime) {
+            LOG(NOTICE, "time expired after %d iterations", i);
+            times.resize(i);
+            break;
+        }
         cluster->write(tableId, key, keyLength, value, length);
         uint64_t interval = Cycles::rdtsc() - start;
         total += interval;
@@ -725,7 +733,7 @@ writeDist(uint64_t tableId, const void* key, uint16_t keyLength,
     TimeDist result;
     getDist(times, &result);
     double totalBytes = length;
-    totalBytes *= count;
+    totalBytes *= downCast<int>(times.size());
     result.bandwidth = totalBytes/Cycles::toSeconds(total);
 
     return result;
@@ -913,13 +921,19 @@ readObject(uint64_t tableId, const void* key, uint16_t keyLength,
  *      Buffer in which to store the state.
  * \param size
  *      Size of buffer.
+ * \param remove
+ *      If true, the command object is removed once we have retrieved it
+ *      (so the next indication of this method will wait for a new command).
+ *      If false, the command object is left in place, so it will be
+ *      returned by future calls to this method, unless someone else
+ *      changes it.
  *
  * \return
  *      The return value is a pointer to a buffer, which now holds the
  *      command.
  */
 const char*
-getCommand(char* buffer, uint32_t size)
+getCommand(char* buffer, uint32_t size, bool remove = true)
 {
     while (true) {
         try {
@@ -927,10 +941,12 @@ getCommand(char* buffer, uint32_t size)
             readObject(controlTable, key.c_str(),
                     downCast<uint16_t>(key.length()), buffer, size);
             if (strcmp(buffer, "idle") != 0) {
-                // Delete the command value so we don't process the same
-                // command twice.
-                cluster->remove(controlTable, key.c_str(),
-                        downCast<uint16_t>(key.length()));
+                if (remove) {
+                    // Delete the command value so we don't process the same
+                    // command twice.
+                    cluster->remove(controlTable, key.c_str(),
+                            downCast<uint16_t>(key.length()));
+                }
                 return buffer;
             }
         }
@@ -938,7 +954,7 @@ getCommand(char* buffer, uint32_t size)
         }
         catch (ObjectDoesntExistException& e) {
         }
-        usleep(10000);
+        Cycles::sleep(10000);
     }
 }
 
@@ -1252,6 +1268,76 @@ printVector(std::vector<double>& data)
         printf("%lf\n", 1e06*(*it));
 }
 
+/**
+ * Given an integer value, generate a key of a given length
+ * that corresponds to that value.
+ *
+ * \param value
+ *      Unique value to encapsulate in the key.
+ * \param length
+ *      Total number of bytes in the resulting key. Must be at least 4.
+ * \param dest
+ *      Memory block in which to write the key; must contain at
+ *      least length bytes.
+ */
+void makeKey(int value, uint32_t length, char* dest)
+{
+    memset(dest, 'x', length);
+    *(reinterpret_cast<int*>(dest)) = value;
+}
+
+/**
+ * Fill a table with a given number of objects of a given size.
+ * This method uses multi-writes to do it quickly.
+ *
+ * \param tableId
+ *      Identifier for the table in which  the objects should be written.
+ * \param numObjects
+ *      Number of objects to write in the table. The objects will have keys
+ *      generated by passing the values (0..numObjects-1) to makeKey.
+ * \param keyLength
+ *      Number of bytes in each key.
+ * \param valueLength
+ *      Size of each object, in bytes.
+ */
+void fillTable(uint64_t tableId, int numObjects, uint16_t keyLength,
+        uint32_t valueLength)
+{
+    #define BATCH_SIZE 500
+
+    // The following buffer is used to accumulate  keys and values for
+    // a single multi-write operation.
+    Buffer buffer;
+    char keys[BATCH_SIZE*keyLength];
+    char values[BATCH_SIZE*valueLength];
+    MultiWriteObject* objects[BATCH_SIZE];
+
+    // Each iteration through the following loop adds one object to
+    // the current multi-write, and invokes the multi-write if needed.
+    uint64_t writeTime = 0;
+    for (int i = 0; i < numObjects; i++) {
+        int j = i % BATCH_SIZE;
+
+        char* key = &keys[j*keyLength];
+        makeKey(i, keyLength, key);
+        char* value = &values[j*valueLength];
+        genRandomString(value, valueLength);
+        objects[j] = buffer.emplaceAppend<MultiWriteObject>(tableId,
+                key, keyLength, value, valueLength);
+
+        // Do the write, if needed.
+        if ((j == (BATCH_SIZE - 1)) || (i == (numObjects-1))) {
+            uint64_t start = Cycles::rdtsc();
+            cluster->multiWrite(objects, j+1);
+            writeTime += Cycles::rdtsc() - start;
+            buffer.reset();
+        }
+    }
+    double rate = numObjects/Cycles::toSeconds(writeTime);
+    RAMCLOUD_LOG(NOTICE, "write rate for objects: %.1f kobjects/sec",
+                rate/1e03);
+}
+
 //----------------------------------------------------------------------
 // Test functions start here
 //----------------------------------------------------------------------
@@ -1264,8 +1350,6 @@ basic()
         return;
     Buffer input, output;
     int sizes[] = {100, 1000, 10000, 100000, 1000000};
-    int readCounts[] = {100000, 100000, 100000, 10000, 10000};
-    int writeCounts[] = {10000, 10000, 10000, 1000, 1000};
     const char* ids[] = {"100", "1K", "10K", "100K", "1M"};
     const char* key = "123456789012345678901234567890";
     uint16_t keyLength = downCast<uint16_t>(strlen(key));
@@ -1277,7 +1361,7 @@ basic()
         cluster->write(dataTable, key, keyLength,
                 input.getRange(0, size), size);
         Buffer output;
-        TimeDist dist = readDist(dataTable, key, keyLength, readCounts[i],
+        TimeDist dist = readDist(dataTable, key, keyLength, 100000, 2.0,
                 output);
         checkBuffer(&output, 0, size, dataTable, key, keyLength);
 
@@ -1292,12 +1376,16 @@ basic()
         snprintf(name, sizeof(name), "basic.read%s.9", ids[i]);
         printf("%-20s %s     %s 90%%\n", name, formatTime(dist.p90).c_str(),
                 description);
-        snprintf(name, sizeof(name), "basic.read%s.99", ids[i]);
-        printf("%-20s %s     %s 99%%\n", name, formatTime(dist.p99).c_str(),
-                description);
-        snprintf(name, sizeof(name), "basic.read%s.999", ids[i]);
-        printf("%-20s %s     %s 99.9%%\n", name, formatTime(dist.p999).c_str(),
-                description);
+        if (dist.p99 != 0) {
+            snprintf(name, sizeof(name), "basic.read%s.99", ids[i]);
+            printf("%-20s %s     %s 99%%\n", name, formatTime(dist.p99).c_str(),
+                    description);
+        }
+        if (dist.p999 != 0) {
+            snprintf(name, sizeof(name), "basic.read%s.999", ids[i]);
+            printf("%-20s %s     %s 99.9%%\n", name,
+                    formatTime(dist.p999).c_str(), description);
+        }
         snprintf(name, sizeof(name), "basic.readBw%s", ids[i]);
         snprintf(description, sizeof(description),
                 "bandwidth reading %sB object (%uB key)", ids[i], keyLength);
@@ -1311,7 +1399,7 @@ basic()
                 input.getRange(0, size), size);
         Buffer output;
         TimeDist dist = writeDist(dataTable, key, keyLength,
-                input.getRange(0, size), size, writeCounts[i]);
+                input.getRange(0, size), size, 10000, 2.0);
         // Make sure the object was properly written.
         cluster->read(dataTable, key, keyLength, &output);
         checkBuffer(&output, 0, size, dataTable, key, keyLength);
@@ -1327,12 +1415,16 @@ basic()
         snprintf(name, sizeof(name), "basic.write%s.9", ids[i]);
         printf("%-20s %s     %s 90%%\n", name, formatTime(dist.p90).c_str(),
                 description);
-        snprintf(name, sizeof(name), "basic.write%s.99", ids[i]);
-        printf("%-20s %s     %s 99%%\n", name, formatTime(dist.p99).c_str(),
-                description);
-        snprintf(name, sizeof(name), "basic.write%s.999", ids[i]);
-        printf("%-20s %s     %s 99.9%%\n", name, formatTime(dist.p999).c_str(),
-                description);
+        if (dist.p99 != 0) {
+            snprintf(name, sizeof(name), "basic.write%s.99", ids[i]);
+            printf("%-20s %s     %s 99%%\n", name, formatTime(dist.p99).c_str(),
+                    description);
+        }
+        if (dist.p999 != 0) {
+            snprintf(name, sizeof(name), "basic.write%s.999", ids[i]);
+            printf("%-20s %s     %s 99.9%%\n", name,
+                    formatTime(dist.p999).c_str(), description);
+        }
         snprintf(name, sizeof(name), "basic.writeBw%s", ids[i]);
         snprintf(description, sizeof(description),
                 "bandwidth writing %sB object (%uB key)", ids[i], keyLength);
@@ -2234,6 +2326,95 @@ multiRead_generalRandom()
     }
 }
 
+// This benchmark measures the total throughput of a single server under
+// a workload consisting of multiRead operations from several clients.
+void
+multiReadThroughput()
+{
+    const uint16_t keyLength = 30;
+    const int numObjects = 2000000;
+#define MRT_BATCH_SIZE 70
+    if (clientIndex == 0) {
+        // This is the master client. Fill in the table, then measure
+        // throughput while gradually increasing the number of workers.
+        int size = objectSize;
+        if (size < 0)
+            size = 100;
+        printf("# RAMCloud multi-read throughput of a single server with a\n"
+                "# varying number of clients issuing %d-object multi-reads on\n"
+                "# randomly-chosen %d-byte objects with %d-byte keys\n",
+                MRT_BATCH_SIZE, size, keyLength);
+        printf("# Generated by 'clusterperf.py multiReadThroughput'\n");
+        readThroughputMaster(numObjects, size, keyLength);
+    } else {
+        // Slaves execute the following code, which creates load by
+        // issuing randomized multi-reads.
+        bool running = false;
+
+        // The following buffer is used to accumulate  keys and values for
+        // a single multi-read operation.
+        Buffer buffer;
+        char keys[MRT_BATCH_SIZE*keyLength];
+        Tub<ObjectBuffer> values[MRT_BATCH_SIZE];
+        MultiReadObject* objects[MRT_BATCH_SIZE];
+        uint64_t startTime;
+        int objectsRead;
+        bool firstRead = true;
+
+        while (true) {
+            char command[20];
+            if (running) {
+                // Write out some statistics for debugging.
+                double totalTime = Cycles::toSeconds(Cycles::rdtsc()
+                        - startTime);
+                double rate = objectsRead/totalTime;
+                RAMCLOUD_LOG(NOTICE, "Multi-read rate: %.1f kobjects/sec",
+                        rate/1e03);
+            }
+            getCommand(command, sizeof(command), false);
+            if (strcmp(command, "run") == 0) {
+                if (!running) {
+                    setSlaveState("running");
+                    running = true;
+                    RAMCLOUD_LOG(NOTICE,
+                            "Starting multiReadThroughput benchmark");
+                }
+
+                // Perform multi-reads for a second (then check to see
+                // if the experiment is over).
+                startTime = Cycles::rdtsc();
+                objectsRead = 0;
+                uint64_t checkTime = startTime + Cycles::fromSeconds(1.0);
+                do {
+                    if (firstRead) {
+                        // Each iteration through the following loop adds one
+                        // object to the current multi-read.
+                        buffer.reset();
+                        for (int i = 0; i < MRT_BATCH_SIZE; i++) {
+                            char* key = &keys[i*keyLength];
+                            makeKey(downCast<int>(generateRandom()%numObjects),
+                                    keyLength, key);
+                            values[i].destroy();
+                            objects[i] = buffer.emplaceAppend<MultiReadObject>(
+                                    dataTable, key, keyLength, &values[i]);
+                        }
+                        firstRead = false;
+                    }
+                    cluster->multiRead(objects, MRT_BATCH_SIZE);
+                    objectsRead += MRT_BATCH_SIZE;
+                } while (Cycles::rdtsc() < checkTime);
+            } else if (strcmp(command, "done") == 0) {
+                setSlaveState("done");
+                RAMCLOUD_LOG(NOTICE, "Ending multiReadThroughput benchmark");
+                return;
+            } else {
+                RAMCLOUD_LOG(ERROR, "unknown command %s", command);
+                return;
+            }
+        }
+    }
+}
+
 // This benchmark measures the multiwrite times for multiple
 // 100B objects with 30B keys on a single master server.
 void
@@ -2349,7 +2530,7 @@ readAllToAll()
         char command[20];
         do {
             getCommand(command, sizeof(command));
-            usleep(10 * 1000);
+            Cycles::sleep(10 * 1000);
         } while (strcmp(command, "run") != 0);
         setSlaveState("running");
 
@@ -2437,6 +2618,14 @@ readDist()
     cluster->read(dataTable, key, keyLength, &value);
     checkBuffer(&value, 0, objectSize, dataTable, key, keyLength);
 
+    // Begin counter collection on the server side.
+    cluster->objectServerControl(dataTable, key, keyLength,
+                            WireFormat::START_PERF_COUNTERS);
+
+    // Force serialization so that writing interferes less with the read
+    // benchmark.
+    Util::serialize();
+
     // Warmup, if desired
     for (int i = 0; i < warmupCount; i++) {
         cluster->read(dataTable, key, keyLength, &value);
@@ -2471,7 +2660,7 @@ readDist()
 void
 readDistRandom()
 {
-    #define NUM_KEYS 2000000
+    int numKeys = 2000000;
     #define BATCH_SIZE 500
     if (clientIndex != 0)
         return;
@@ -2489,8 +2678,16 @@ readDistRandom()
     char* charValues = new char[BATCH_SIZE * objectSize];
     memset(charValues, 0, BATCH_SIZE * objectSize);
 
-    uint64_t i, j;
-    for (i = 0; i < NUM_KEYS; i++) {
+    int i, j;
+    uint64_t stopTime = Cycles::rdtsc() + Cycles::fromSeconds(10.0);
+    for (i = 0; i < numKeys; i++) {
+        if (Cycles::rdtsc() >= stopTime) {
+            // Limit the amount of time we spend filling the table, so the
+            // test doesn't time out.
+            numKeys = i;
+            LOG(NOTICE, "Limiting object count to %d", numKeys);
+            break;
+        }
         j = i % BATCH_SIZE;
 
         char* key = keys + j * keyLength;
@@ -2519,13 +2716,18 @@ readDistRandom()
         cluster->multiWrite(objects, static_cast<uint32_t>(j));
 
         // Clean up the actual MultiWriteObjects
-        for (uint64_t k = 0; k < j; k++)
+        for (int k = 0; k < j; k++)
             delete objects[k];
     }
 
     delete[] keys;
     delete[] charValues;
     delete[] objects;
+
+    // Begin counter collection on the server side.
+    memset(key, 0, keyLength);
+    cluster->objectServerControl(dataTable, key, keyLength,
+                            WireFormat::START_PERF_COUNTERS);
 
     // Force serialization so that writing interferes less with the read
     // benchmark.
@@ -2538,7 +2740,7 @@ readDistRandom()
         // We generate the random number separately to avoid timing potential
         // cache misses on the client side.
         memset(key, 0, keyLength);
-        *reinterpret_cast<uint64_t*>(&key) = generateRandom() % NUM_KEYS;
+        *reinterpret_cast<uint64_t*>(&key) = generateRandom() % numKeys;
 
         // Do the benchmark
         uint64_t start = Cycles::rdtsc();
@@ -2566,7 +2768,6 @@ readDistRandom()
         valuesInLine++;
     }
     printf("\n");
-    #undef NUM_KEYS
 }
 
 // This benchmark measures the latency and server throughput for reads
@@ -2926,6 +3127,124 @@ readRandom()
     sendCommand("done", "done", 1, numClients-1);
 }
 
+/**
+ * This method implements the client-0 (master) functionality for both
+ * readThroughput and multiReadThroughput.
+ * \param numObjects
+ *      Number of objects to create in the table.
+ * \param size
+ *      Size of each object, in bytes.
+ * \param keyLength
+ *      Size of keys, in bytes.
+ */
+void
+readThroughputMaster(int numObjects, int size, uint16_t keyLength)
+{
+    // This is the master client. Fill in the table, then measure
+    // throughput while gradually increasing the number of workers.
+    printf("#\n");
+    printf("# numClients   throughput     worker utiliz.\n");
+    printf("#              (kreads/sec)\n");
+    printf("#-------------------------------------------\n");
+    fillTable(dataTable, numObjects, keyLength, size);
+    for (int numSlaves = 1; numSlaves < numClients; numSlaves++) {
+        sendCommand("run", "running", numSlaves, 1);
+        Buffer statsBuffer;
+        cluster->objectServerControl(dataTable, "abc", 3,
+                WireFormat::ControlOp::GET_PERF_STATS, NULL, 0,
+                &statsBuffer);
+        PerfStats startStats = *statsBuffer.getStart<PerfStats>();
+        Cycles::sleep(1000000);
+        cluster->objectServerControl(dataTable, "abc", 3,
+                WireFormat::ControlOp::GET_PERF_STATS, NULL, 0,
+                &statsBuffer);
+        PerfStats finishStats = *statsBuffer.getStart<PerfStats>();
+        double elapsedTime = static_cast<double>(finishStats.collectionTime -
+                startStats.collectionTime)/ finishStats.cyclesPerSecond;
+        double rate = static_cast<double>(finishStats.readCount -
+                startStats.readCount) / elapsedTime;
+        double utilization = static_cast<double>(finishStats.activeCycles -
+                startStats.activeCycles) / static_cast<double>(
+                finishStats.collectionTime - startStats.collectionTime);
+        printf("%5d         %8.0f        %8.3f\n", numSlaves, rate/1e03,
+                utilization);
+    }
+    cluster->objectServerControl(dataTable, "abc", 3,
+            WireFormat::ControlOp::LOG_TIME_TRACE);
+    sendCommand("done", "done", 1, numClients-1);
+}
+
+// This benchmark measures total throughput of a single server (in objects
+// read per second) under a workload consisting of individual random object
+// reads.
+void
+readThroughput()
+{
+    const uint16_t keyLength = 30;
+    const int numObjects = 2000000;
+    if (clientIndex == 0) {
+        // This is the master client.
+        int size = objectSize;
+        if (size < 0)
+            size = 100;
+        printf("# RAMCloud read throughput of a single server with a varying\n"
+                "# number of clients issuing individual reads on randomly\n"
+                "# chosen %d-byte objects with %d-byte keys\n",
+                size, keyLength);
+        printf("# Generated by 'clusterperf.py readThroughput'\n");
+        readThroughputMaster(numObjects, size, keyLength);
+    } else {
+        // Slaves execute the following code, which creates load by
+        // issuing individual reads.
+        bool running = false;
+
+        uint64_t startTime;
+        int objectsRead;
+
+        while (true) {
+            char command[20];
+            if (running) {
+                // Write out some statistics for debugging.
+                double totalTime = Cycles::toSeconds(Cycles::rdtsc()
+                        - startTime);
+                double rate = objectsRead/totalTime;
+                RAMCLOUD_LOG(NOTICE, "Read rate: %.1f kobjects/sec",
+                        rate/1e03);
+            }
+            getCommand(command, sizeof(command), false);
+            if (strcmp(command, "run") == 0) {
+                if (!running) {
+                    setSlaveState("running");
+                    running = true;
+                    RAMCLOUD_LOG(NOTICE,
+                            "Starting readThroughput benchmark");
+                }
+
+                // Perform reads for a second (then check to see
+                // if the experiment is over).
+                startTime = Cycles::rdtsc();
+                objectsRead = 0;
+                uint64_t checkTime = startTime + Cycles::fromSeconds(1.0);
+                do {
+                    char key[keyLength];
+                    Buffer value;
+                    makeKey(downCast<int>(generateRandom() % numObjects),
+                            keyLength, key);
+                    cluster->read(dataTable, key, keyLength, &value);
+                    ++objectsRead;
+                } while (Cycles::rdtsc() < checkTime);
+            } else if (strcmp(command, "done") == 0) {
+                setSlaveState("done");
+                RAMCLOUD_LOG(NOTICE, "Ending readThroughput benchmark");
+                return;
+            } else {
+                RAMCLOUD_LOG(ERROR, "unknown command %s", command);
+                return;
+            }
+        }
+    }
+}
+
 // Read times for 100B objects with string keys of different lengths.
 void
 readVaryingKeyLength()
@@ -2956,7 +3275,7 @@ readVaryingKeyLength()
         fillBuffer(input, dataLength, dataTable, key, keyLength);
         cluster->write(dataTable, key, keyLength,
                 input.getRange(0, dataLength), dataLength);
-        double t = readDist(dataTable, key, keyLength, 1000, output).p50;
+        double t = readDist(dataTable, key, keyLength, 1000, 1.0, output).p50;
         checkBuffer(&output, 0, dataLength, dataTable, key, keyLength);
 
         printf("%12u %16.1f %19.1f\n", keyLength, 1e06*t,
@@ -2995,7 +3314,7 @@ writeVaryingKeyLength()
         cluster->write(dataTable, key, keyLength,
                 input.getRange(0, dataLength), dataLength);
         TimeDist dist = writeDist(dataTable, key, keyLength,
-                input.getRange(0, dataLength), dataLength, 1000);
+                input.getRange(0, dataLength), dataLength, 1000, 1.0);
         Buffer output;
         cluster->read(dataTable, key, keyLength, &output);
         checkBuffer(&output, 0, dataLength, dataTable, key, keyLength);
@@ -3094,6 +3413,7 @@ TestInfo tests[] = {
     {"multiRead_oneObjectPerMaster", multiRead_oneObjectPerMaster},
     {"multiRead_general", multiRead_general},
     {"multiRead_generalRandom", multiRead_generalRandom},
+    {"multiReadThroughput", multiReadThroughput},
     {"netBandwidth", netBandwidth},
     {"readAllToAll", readAllToAll},
     {"readDist", readDist},
@@ -3101,6 +3421,7 @@ TestInfo tests[] = {
     {"readLoaded", readLoaded},
     {"readNotFound", readNotFound},
     {"readRandom", readRandom},
+    {"readThroughput", readThroughput},
     {"readVaryingKeyLength", readVaryingKeyLength},
     {"threadLoaded", threadLoaded},
     {"writeVaryingKeyLength", writeVaryingKeyLength},

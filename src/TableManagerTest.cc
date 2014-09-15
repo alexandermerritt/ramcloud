@@ -120,24 +120,26 @@ TEST_F(TableManagerTest, createIndex) {
     MasterService* master2 = cluster.addServer(masterConfig)->master.get();
     updateManager->reset();
 
-    EXPECT_THROW(tableManager->createIndex(1, 0, 0, 0),
-                                                    TableManager::NoSuchTable);
+    EXPECT_THROW(tableManager->createIndex(1, 1, 0, 0),
+                 TableManager::NoSuchTable);
+
     EXPECT_EQ(1U, tableManager->createTable("foo", 1));
 
-    EXPECT_EQ(2U, tableManager->createTable("__indexTable:1:0:0", 1));
-    EXPECT_THROW(tableManager->createIndex(3, 0, 0, 1),
-                                                    TableManager::NoSuchTable);
-    EXPECT_TRUE(tableManager->createIndex(1, 0, 0, 1));
-    EXPECT_EQ(0U, master1->indexletManager.getCount());
-    EXPECT_EQ(1U, master2->indexletManager.getCount());
+    EXPECT_NO_THROW(tableManager->createIndex(1, 1, 0, 1));
+    EXPECT_EQ(0U, master1->indexletManager.getNumIndexlets());
+    EXPECT_EQ(1U, master2->indexletManager.getNumIndexlets());
 
-    EXPECT_EQ(3U, tableManager->createTable("__indexTable:1:1:0", 1));
-    EXPECT_TRUE(tableManager->createIndex(1, 1, 0, 1));
-    EXPECT_EQ(1U, master1->indexletManager.getCount());
-    EXPECT_EQ(1U, master2->indexletManager.getCount());
+    EXPECT_THROW(tableManager->createIndex(1, 0, 0, 1),
+                 InvalidParameterException);
+    EXPECT_EQ(0U, master1->indexletManager.getNumIndexlets());
+    EXPECT_EQ(1U, master2->indexletManager.getNumIndexlets());
+
+    EXPECT_NO_THROW(tableManager->createIndex(1, 2, 0, 1));
+    EXPECT_EQ(1U, master1->indexletManager.getNumIndexlets());
+    EXPECT_EQ(1U, master2->indexletManager.getNumIndexlets());
 
     // duplicate index already exists
-    EXPECT_FALSE(tableManager->createIndex(1, 0, 0, 1));
+    EXPECT_NO_THROW(tableManager->createIndex(1, 1, 0, 1));
 };
 
 TEST_F(TableManagerTest, dropIndex) {
@@ -147,21 +149,25 @@ TEST_F(TableManagerTest, dropIndex) {
 
     EXPECT_EQ(1U, tableManager->createTable("foo", 1));
 
-    EXPECT_EQ(2U, tableManager->createTable("__indexTable:1:0:0", 1));
-    EXPECT_TRUE(tableManager->createIndex(1, 0, 0, 1));
-    EXPECT_EQ(0U, master1->indexletManager.getCount());
-    EXPECT_EQ(1U, master2->indexletManager.getCount());
+    EXPECT_NO_THROW(tableManager->createIndex(1, 1, 0, 1));
+    EXPECT_EQ(0U, master1->indexletManager.getNumIndexlets());
+    EXPECT_EQ(1U, master2->indexletManager.getNumIndexlets());
 
-    EXPECT_EQ(3U, tableManager->createTable("__indexTable:1:1:0", 1));
-    EXPECT_TRUE(tableManager->createIndex(1, 1, 0, 1));
-    EXPECT_EQ(1U, master1->indexletManager.getCount());
-    EXPECT_EQ(1U, master2->indexletManager.getCount());
+    EXPECT_NO_THROW(tableManager->createIndex(1, 2, 0, 1));
+    EXPECT_EQ(1U, master1->indexletManager.getNumIndexlets());
+    EXPECT_EQ(1U, master2->indexletManager.getNumIndexlets());
 
-    EXPECT_FALSE(tableManager->dropIndex(2, 1));
-    EXPECT_FALSE(tableManager->dropIndex(1, 2));
-    EXPECT_TRUE(tableManager->dropIndex(1, 1));
-    EXPECT_EQ(0U, master1->indexletManager.getCount());
-    EXPECT_EQ(1U, master2->indexletManager.getCount());
+    TestLog::Enable _("dropIndex");
+    tableManager->dropIndex(2, 1);
+    tableManager->dropIndex(1, 3);
+    tableManager->dropIndex(1, 2);
+    EXPECT_EQ("dropIndex: Cannot find index '1' for table '2' | "
+              "dropIndex: Cannot find index '3' for table '1' | "
+              "dropIndex: Dropping index '2' from table '1'",
+              TestLog::get());
+
+    EXPECT_EQ(0U, master1->indexletManager.getNumIndexlets());
+    EXPECT_EQ(1U, master2->indexletManager.getNumIndexlets());
     //TODO(ashgup): Need tests for notifyCreateIndex and notifyDropIndex.
 };
 
@@ -179,8 +185,8 @@ TEST_F(TableManagerTest, createTable_basics) {
             "endKeyHash: 0xffffffffffffffff, serverId: 1.0, status: NORMAL, "
             "ctime: 0.0 } }",
             tableManager->debugString());
-    EXPECT_EQ(1U, master1->tabletManager.getCount());
-    EXPECT_EQ(0U, master2->tabletManager.getCount());
+    EXPECT_EQ(1U, master1->tabletManager.getNumTablets());
+    EXPECT_EQ(0U, master2->tabletManager.getNumTablets());
 
     EXPECT_EQ(2U, tableManager->createTable("secondTable", 3));
     EXPECT_EQ(2U, tableManager->directory["secondTable"]->id);
@@ -197,8 +203,8 @@ TEST_F(TableManagerTest, createTable_basics) {
             "endKeyHash: 0xffffffffffffffff, serverId: 2.0, "
             "status: NORMAL, ctime: 0.0 } }",
             tableManager->debugString());
-    EXPECT_EQ(2U, master1->tabletManager.getCount());
-    EXPECT_EQ(2U, master2->tabletManager.getCount());
+    EXPECT_EQ(2U, master1->tabletManager.getNumTablets());
+    EXPECT_EQ(2U, master2->tabletManager.getNumTablets());
 
     // Make sure that information has been properly recorded on external
     // storage.
@@ -231,14 +237,14 @@ TEST_F(TableManagerTest, dropTable_basics) {
     updateManager->reset();
 
     EXPECT_EQ(1U, tableManager->createTable("foo", 2));
-    EXPECT_EQ(1U, master1->tabletManager.getCount());
-    EXPECT_EQ(1U, master2->tabletManager.getCount());
+    EXPECT_EQ(1U, master1->tabletManager.getNumTablets());
+    EXPECT_EQ(1U, master2->tabletManager.getNumTablets());
 
     tableManager->nextTableId = 100u;
     cluster.externalStorage.log.clear();
     tableManager->dropTable("foo");
-    EXPECT_EQ(0U, master1->tabletManager.getCount());
-    EXPECT_EQ(0U, master2->tabletManager.getCount());
+    EXPECT_EQ(0U, master1->tabletManager.getNumTablets());
+    EXPECT_EQ(0U, master2->tabletManager.getNumTablets());
     EXPECT_EQ("",
             tableManager->debugString());
 
@@ -269,19 +275,17 @@ TEST_F(TableManagerTest, dropTable_index) {
 
     EXPECT_EQ(1U, tableManager->createTable("foo", 1));
 
-    EXPECT_EQ(2U, tableManager->createTable("__indexTable:1:0:0", 1));
-    EXPECT_TRUE(tableManager->createIndex(1, 0, 0, 1));
-    EXPECT_EQ(0U, master1->indexletManager.getCount());
-    EXPECT_EQ(1U, master2->indexletManager.getCount());
+    EXPECT_NO_THROW(tableManager->createIndex(1, 1, 0, 1));
+    EXPECT_EQ(0U, master1->indexletManager.getNumIndexlets());
+    EXPECT_EQ(1U, master2->indexletManager.getNumIndexlets());
 
-    EXPECT_EQ(3U, tableManager->createTable("__indexTable:1:1:0", 1));
-    EXPECT_TRUE(tableManager->createIndex(1, 1, 0, 1));
-    EXPECT_EQ(1U, master1->indexletManager.getCount());
-    EXPECT_EQ(1U, master2->indexletManager.getCount());
+    EXPECT_NO_THROW(tableManager->createIndex(1, 2, 0, 1));
+    EXPECT_EQ(1U, master1->indexletManager.getNumIndexlets());
+    EXPECT_EQ(1U, master2->indexletManager.getNumIndexlets());
 
     tableManager->dropTable("foo");
-    EXPECT_EQ(0U, master1->indexletManager.getCount());
-    EXPECT_EQ(0U, master2->indexletManager.getCount());
+    EXPECT_EQ(0U, master1->indexletManager.getNumIndexlets());
+    EXPECT_EQ(0U, master2->indexletManager.getNumIndexlets());
 }
 
 
@@ -301,12 +305,11 @@ TEST_F(TableManagerTest, getIndxletInfoByIndexletTableId) {
     updateManager->reset();
 
     EXPECT_EQ(1U, tableManager->createTable("foo", 1));
-    EXPECT_EQ(2U, tableManager->createTable("__indexTable:1:0:0", 1));
-    EXPECT_TRUE(tableManager->createIndex(1, 0, 0, 1));
+    EXPECT_NO_THROW(tableManager->createIndex(1, 1, 0, 1));
     ProtoBuf::Indexlets::Indexlet indexlet;
     EXPECT_TRUE(tableManager->getIndexletInfoByIndexletTableId(2, indexlet));
     EXPECT_EQ(1U, indexlet.table_id());
-    EXPECT_EQ(0U, indexlet.index_id());
+    EXPECT_EQ(1U, indexlet.index_id());
     EXPECT_EQ(2U, indexlet.indexlet_table_id());
 };
 
@@ -316,8 +319,7 @@ TEST_F(TableManagerTest, isIndexletTable) {
     updateManager->reset();
 
     EXPECT_EQ(1U, tableManager->createTable("foo", 1));
-    EXPECT_EQ(2U, tableManager->createTable("__indexTable:1:0:0", 1));
-    EXPECT_TRUE(tableManager->createIndex(1, 0, 0, 1));
+    EXPECT_NO_THROW(tableManager->createIndex(1, 1, 0, 1));
 
     EXPECT_TRUE(tableManager->isIndexletTable(2));
     EXPECT_FALSE(tableManager->isIndexletTable(1));
@@ -390,7 +392,7 @@ TEST_F(TableManagerTest, reassignTabletOwnership_basics) {
             "sequence_number: 2 reassign { server_id: 2 start_key_hash: 0 "
             "end_key_hash: 9223372036854775807 }",
             cluster.externalStorage.getPbValue<ProtoBuf::Table>());
-    EXPECT_EQ(2U, master2->tabletManager.getCount());
+    EXPECT_EQ(2U, master2->tabletManager.getNumTablets());
 }
 
 TEST_F(TableManagerTest, reassignTabletOwnership_noSuchTablet) {
@@ -534,7 +536,7 @@ TEST_F(TableManagerTest, recover_sequenceNumberCompleted) {
             "serverId: 1.0, status: NORMAL, ctime: 31.32 } }",
             tableManager->debugString());
     EXPECT_EQ("", TestLog::get());
-    EXPECT_EQ(0U, master1->tabletManager.getCount());
+    EXPECT_EQ(0U, master1->tabletManager.getNumTablets());
 }
 TEST_F(TableManagerTest, recover_incompleteCreate) {
     MasterService* master1 = cluster.addServer(masterConfig)->master.get();
@@ -561,7 +563,7 @@ TEST_F(TableManagerTest, recover_incompleteCreate) {
     EXPECT_EQ("notifyCreate: Assigning table id 444, "
             "key hashes 0x800-0x900, to master 1.0",
             TestLog::get());
-    EXPECT_EQ(1U, master1->tabletManager.getCount());
+    EXPECT_EQ(1U, master1->tabletManager.getNumTablets());
 }
 TEST_F(TableManagerTest, recover_incompleteDelete) {
     ProtoBuf::Table info;
@@ -673,8 +675,7 @@ TEST_F(TableManagerTest, serializeIndexConfig) {
     EXPECT_EQ(1U, tableManager->createTable("foo", 1));
     EXPECT_EQ(2U, tableManager->createTable("bar", 1));
 
-    EXPECT_EQ(3U, tableManager->createTable("__indexTable:2:1:0", 1));
-    EXPECT_TRUE(tableManager->createIndex(2, 1, 0, 1));
+    EXPECT_NO_THROW(tableManager->createIndex(2, 1, 0, 1));
 
     ProtoBuf::TableConfig tableConfig;
     tableManager->serializeTableConfig(&tableConfig, 2);
@@ -705,8 +706,8 @@ TEST_F(TableManagerTest, splitTablet_basics) {
             "{ 0x8000000000000000-0xffffffffffffffff on 2.0 } "
             "{ 0x1000-0x7fffffffffffffff on 1.0 } }",
             tableManager->debugString(true));
-    EXPECT_EQ(2U, master1->tabletManager.getCount());
-    EXPECT_EQ(1U, master2->tabletManager.getCount());
+    EXPECT_EQ(2U, master1->tabletManager.getNumTablets());
+    EXPECT_EQ(1U, master2->tabletManager.getNumTablets());
 
     // Make sure that information was properly recorded on external
     // storage.
@@ -728,7 +729,7 @@ TEST_F(TableManagerTest, splitTablet_splitAlreadyExists) {
             "{ 0x0-0x7fffffffffffffff on 1.0 } "
             "{ 0x8000000000000000-0xffffffffffffffff on 1.0 } }",
             tableManager->debugString(true));
-    EXPECT_EQ(2U, master1->tabletManager.getCount());
+    EXPECT_EQ(2U, master1->tabletManager.getNumTablets());
     EXPECT_EQ("", cluster.externalStorage.log);
 }
 TEST_F(TableManagerTest, splitTablet_tabletRecovering) {
@@ -844,8 +845,8 @@ TEST_F(TableManagerTest, notifyCreate) {
     TestLog::Enable _("notifyCreate");
     TestLog::reset();
     tableManager->notifyCreate(lock, &table);
-    EXPECT_EQ(1U, master1->tabletManager.getCount());
-    EXPECT_EQ(2U, master2->tabletManager.getCount());
+    EXPECT_EQ(1U, master1->tabletManager.getNumTablets());
+    EXPECT_EQ(2U, master2->tabletManager.getNumTablets());
     EXPECT_EQ("notifyCreate: Assigning table id 111, "
             "key hashes 0x0-0x100, to master 1.0 | "
             "notifyCreate: Assigning table id 111, "
@@ -879,8 +880,10 @@ TEST_F(TableManagerTest, notifyDropTable_basics) {
     tableManager->notifyDropTable(lock, &table);
     EXPECT_EQ("notifyDropTable: Requesting master 1.0 to drop "
             "table id 444, key hashes 0x200-0x300 | "
-            "dropTabletOwnership: Could not drop ownership on unknown "
-            "tablet [0x200,0x300] in tableId 444! | "
+            "deleteTablet: Could not find tablet in tableId 444 with "
+            "startKeyHash 512 and endKeyHash 768 | "
+            "dropTabletOwnership: Dropped ownership of (or did not own) "
+            "tablet [0x200,0x300] in tableId 444 | "
             "notifyDropTable: Requesting master 99.0 to drop "
             "table id 444, key hashes 0x800-0x900 | "
             "notifyDropTable: dropTabletOwnership skipped for master 99.0 "
@@ -920,9 +923,9 @@ TEST_F(TableManagerTest, notifyReassignTablet) {
     TestLog::Enable _("notifyReassignTablet");
 
     // Success.
-    EXPECT_EQ(0U, master1->tabletManager.getCount());
+    EXPECT_EQ(0U, master1->tabletManager.getNumTablets());
     tableManager->notifyReassignTablet(lock, &info);
-    EXPECT_EQ(1U, master1->tabletManager.getCount());
+    EXPECT_EQ(1U, master1->tabletManager.getNumTablets());
     EXPECT_EQ("notifyReassignTablet: Reassigning table id 1, "
             "key hashes 0x1000-0x2000 to master 1.0", TestLog::get());
     TestLog::reset();
@@ -954,9 +957,9 @@ TEST_F(TableManagerTest, notifySplitTablet) {
     TestLog::Enable _("notifySplitTablet");
 
     // Success.
-    EXPECT_EQ(1U, master1->tabletManager.getCount());
+    EXPECT_EQ(1U, master1->tabletManager.getNumTablets());
     tableManager->notifySplitTablet(lock, &info);
-    EXPECT_EQ(2U, master1->tabletManager.getCount());
+    EXPECT_EQ(2U, master1->tabletManager.getNumTablets());
     EXPECT_EQ("notifySplitTablet: Requesting master 1.0 to split "
             "table id 1 at key hash 0x1000", TestLog::get());
     TestLog::reset();

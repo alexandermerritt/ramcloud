@@ -70,12 +70,12 @@ class TableManager {
             CoordinatorUpdateManager* updateManager);
     ~TableManager();
 
-    bool createIndex(uint64_t tableId, uint8_t indexId, uint8_t indexType,
+    void createIndex(uint64_t tableId, uint8_t indexId, uint8_t indexType,
             uint8_t numIndexlets);
     uint64_t createTable(const char* name, uint32_t serverSpan);
     string debugString(bool shortForm = false);
-    uint8_t dropIndex(uint64_t tableId, uint8_t indexId);
-    vector<pair<uint8_t, uint8_t>>  dropTable(const char* name);
+    void dropIndex(uint64_t tableId, uint8_t indexId);
+    void dropTable(const char* name);
     uint64_t getTableId(const char* name);
     Tablet getTablet(uint64_t tableId, uint64_t keyHash);
     bool getIndexletInfoByIndexletTableId(uint64_t indexletTableId,
@@ -100,6 +100,12 @@ class TableManager {
   PRIVATE:
     /**
      * The following structure holds information about a indexlet of an index.
+     * 
+     * Each indexlet is stored by a backing RAMCloud table. The name of the
+     * table is synthesized and has the format:
+     * "__indexTable:tableId:indexId:i" where tableId and indexId
+     * identify the index and i refers to the i-th indexlet corresponding
+     * to that index.
      */
     struct Indexlet : public RAMCloud::Indexlet {
         public:
@@ -126,7 +132,8 @@ class TableManager {
         /// The server id of the master owning this indexlet.
         ServerId serverId;
 
-        /// The id of the table on serverId holding the index content
+        /// The id of the backing table for the indexlet that is stored
+        /// on the server with id serverId.
         uint64_t indexletTableId;
 
         /// The id of the owning table
@@ -162,6 +169,10 @@ class TableManager {
         vector<Indexlet*> indexlets;
     };
 
+    /// An instance of this is a part of a Table and is used to store the
+    /// information about each of the indexes for that table.
+    /// It is a mapping between an indexId and the Index corresponding to that
+    /// indexId for that table.
     typedef std::unordered_map<uint8_t, Index*> IndexMap;
 
     struct Table {
@@ -185,7 +196,6 @@ class TableManager {
 
         /// Information about each of the indexes in the table. The
         /// entries are allocated and freed dynamically.
-        //vector<Index*> indexMap;
         IndexMap indexMap;
     };
 
@@ -221,11 +231,15 @@ class TableManager {
     IdMap idMap;
 
     /// Maps from indexletTable id to indexlet.
-    /// This is a map since every indexletTable can have at most one
-    /// containing indexlet
+    /// This is a map since every indexletTable can have at most one table
+    /// containing indexlet.
     typedef std::unordered_map<uint64_t, Indexlet*> IndexletTableMap;
     IndexletTableMap indexletTableMap;
 
+    uint64_t createTable(const Lock& lock, const char* name,
+            uint32_t serverSpan);
+    void dropIndex(const Lock& lock, uint64_t tableId, uint8_t indexId);
+    void dropTable(const Lock& lock, const char* name);
     Tablet* findTablet(const Lock& lock, Table* table, uint64_t keyHash);
     void notifyCreate(const Lock& lock, Table* table);
     void notifyCreateIndex(const Lock& lock, Index* index);
