@@ -520,7 +520,11 @@ Infiniband::QueuePair::QueuePair(Infiniband& infiniband, ibv_qp_type type,
       handshakeSin()
 {
     snprintf(peerName, sizeof(peerName), "?unknown?");
+#if defined(HAS_MELLANOX_IB)
     if (type != IBV_QPT_RC && type != IBV_QPT_UD && type != IBV_QPT_RAW_ETH)
+#else
+    if (type != IBV_QPT_RC && type != IBV_QPT_UD)
+#endif
         throw TransportException(HERE, "invalid queue pair type");
 
     ibv_qp_init_attr qpia;
@@ -563,8 +567,10 @@ Infiniband::QueuePair::QueuePair(Infiniband& infiniband, ibv_qp_type type,
         mask |= IBV_QP_QKEY;
         mask |= IBV_QP_PKEY_INDEX;
         break;
+#if defined(HAS_MELLANOX_IB)
     case IBV_QPT_RAW_ETH:
         break;
+#endif
     default:
         assert(0);
     }
@@ -679,7 +685,11 @@ void
 Infiniband::QueuePair::activate(const Tub<MacAddress>& localMac)
 {
     ibv_qp_attr qpa;
+#if defined(HAS_MELLANOX_IB)
     if (type != IBV_QPT_UD && type != IBV_QPT_RAW_ETH)
+#else
+    if (type != IBV_QPT_UD)
+#endif
         throw TransportException(HERE, "activate() called on wrong qp type");
 
     if (getState() != IBV_QPS_INIT) {
@@ -700,7 +710,10 @@ Infiniband::QueuePair::activate(const Tub<MacAddress>& localMac)
     // now move to RTS state
     qpa.qp_state = IBV_QPS_RTS;
     int flags = IBV_QP_STATE;
-    if (type != IBV_QPT_RAW_ETH) {
+#if defined(HAS_MELLANOX_IB)
+    if (type != IBV_QPT_RAW_ETH)
+#endif
+    {
         qpa.sq_psn = initialPsn;
         flags |= IBV_QP_SQ_PSN;
     }
@@ -710,6 +723,7 @@ Infiniband::QueuePair::activate(const Tub<MacAddress>& localMac)
         throw TransportException(HERE, ret);
     }
 
+#if defined(HAS_MELLANOX_IB)
     if (type == IBV_QPT_RAW_ETH) {
         ibv_gid mgid;
         memset(&mgid, 0, sizeof(mgid));
@@ -719,6 +733,7 @@ Infiniband::QueuePair::activate(const Tub<MacAddress>& localMac)
             throw TransportException(HERE, ret);
         }
     }
+#endif
 }
 
 /**
