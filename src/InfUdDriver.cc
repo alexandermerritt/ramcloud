@@ -78,17 +78,24 @@ InfUdDriver::InfUdDriver(Context* context,
     , poller()
 {
     const char *ibDeviceName = NULL;
+
+#if defined(HAS_MELLANOX_IB)
     bool macAddressProvided = false;
+#else
+    assert(!ethernet);
+#endif
 
     if (sl != NULL) {
         locatorString = sl->getOriginalString();
 
+#if defined(HAS_MELLANOX_IB)
         if (ethernet) {
             try {
                 localMac.construct(sl->getOption<const char*>("mac"));
                 macAddressProvided = true;
             } catch (ServiceLocator::NoSuchKeyException& e) {}
         }
+#endif
 
         try {
             ibDeviceName   = sl->getOption<const char *>("dev");
@@ -100,8 +107,10 @@ InfUdDriver::InfUdDriver(Context* context,
 
     }
 
+#if defined(HAS_MELLANOX_IB)
     if (ethernet && !macAddressProvided)
         localMac.construct(MacAddress::RANDOM);
+#endif
 
     infiniband = realInfiniband.construct(ibDeviceName);
 
@@ -127,8 +136,12 @@ InfUdDriver::InfUdDriver(Context* context,
         throw DriverException(HERE, errno);
     }
 
+#if defined(HAS_MELLANOX_IB)
     qp = infiniband->createQueuePair(localMac ? IBV_QPT_RAW_ETH
                                               : IBV_QPT_UD,
+#else
+    qp = infiniband->createQueuePair(IBV_QPT_UD,
+#endif
                                      ibPhysicalPort, NULL,
                                      txcq, rxcq, MAX_TX_QUEUE_DEPTH,
                                      MAX_RX_QUEUE_DEPTH,
@@ -141,10 +154,13 @@ InfUdDriver::InfUdDriver(Context* context,
     // update our locatorString, if one was provided, with the dynamic
     // address
     if (!locatorString.empty()) {
+#if defined(HAS_MELLANOX_IB)
         if (localMac) {
             if (!macAddressProvided)
                 locatorString += "mac=" + localMac->toString();
-        } else {
+        } else
+#endif
+        {
             locatorString += format("lid=%u,qpn=%u", lid, qpn);
         }
     }

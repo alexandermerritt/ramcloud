@@ -104,8 +104,15 @@ INFINIBAND = $(shell $(CXX) $(INCLUDES) $(EXTRACXXFLAGS) $(LIBS) -libverbs \
                          && echo yes || echo no)
 
 ifeq ($(INFINIBAND),yes)
-COMFLAGS += -DINFINIBAND
+$(info >> Found InfiniBand)
 LIBS += -libverbs
+COMFLAGS += -DINFINIBAND
+# If you have a Mellanox card, you can enable this
+# to turn on support for Ethernet over IB
+# XXX https://ramcloud.atlassian.net/browse/RAM-499
+#COMFLAGS += -DHAS_MELLANOX_IB
+else
+$(info >> InfiniBand NOT detected)
 endif
 
 ifeq ($(YIELD),yes)
@@ -115,12 +122,12 @@ endif
 CFLAGS_BASE := $(COMFLAGS) -std=gnu0x $(INCLUDES)
 CFLAGS_SILENT := $(CFLAGS_BASE)
 CFLAGS_NOWERROR := $(CFLAGS_BASE) $(CWARNS)
-CFLAGS := $(CFLAGS_BASE) -Werror $(CWARNS)
+CFLAGS := $(CFLAGS_BASE) $(CWARNS)
 
 CXXFLAGS_BASE := $(COMFLAGS) -std=c++0x $(INCLUDES)
 CXXFLAGS_SILENT := $(CXXFLAGS_BASE) $(EXTRACXXFLAGS)
 CXXFLAGS_NOWERROR := $(CXXFLAGS_BASE) $(CXXWARNS) $(EXTRACXXFLAGS)
-CXXFLAGS := $(CXXFLAGS_BASE) -Werror $(CXXWARNS) $(EXTRACXXFLAGS) $(PERF)
+CXXFLAGS := $(CXXFLAGS_BASE) $(CXXWARNS) $(EXTRACXXFLAGS) $(PERF)
 
 ifeq ($(COMPILER),intel)
 CXXFLAGS = $(CXXFLAGS_BASE) $(CXXWARNS)
