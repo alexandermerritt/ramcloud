@@ -25,7 +25,7 @@ OBJDIR	:= obj$(OBJSUFFIX)
 TOP	:= $(shell echo $${PWD-`pwd`})
 GTEST_DIR ?= $(TOP)/gtest
 ZOOKEEPER_LIB ?= /usr/lib/x86_64-linux-gnu/libzookeeper_mt.a
-ZOOKEEPER_DIR ?= /usr/local/zookeeper-3.4.5
+ZOOKEEPER_DIR ?= /usr/share/zookeeper
 
 
 ifeq ($(DEBUG),yes)
