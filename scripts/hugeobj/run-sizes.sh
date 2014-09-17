@@ -1,7 +1,7 @@
 #! /usr/bin/env bash
 set -e
 set -u
-source $(cd "$(dirname $0)" && pwd)/bfc-env.sh
+source $(cd "$(dirname $0)" && pwd)/env.sh
 
 MIN_POW2=17
 MAX_POW2=21

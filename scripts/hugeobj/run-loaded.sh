@@ -1,7 +1,7 @@
 #! /usr/bin/env bash
 set -e
 set -u
-source $(cd "$(dirname $0)" && pwd)/bfc-env.sh
+source $(cd "$(dirname $0)" && pwd)/env.sh
 
 BIN=$RAMCLOUD_ROOT/obj.$GIT_BRANCH/ClusterPerf
 
