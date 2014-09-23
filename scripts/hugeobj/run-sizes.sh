@@ -10,7 +10,7 @@ BIN=$RAMCLOUD_ROOT/obj.$GIT_BRANCH/ClusterPerf
 [[ ! -e $BIN ]] && \
     echo "ClusterPerf does not exist. Compile sources." && exit 1
 
-export RAMCLOUD_IB_PORT=$BFC_IB_PORT
+export RAMCLOUD_IB_PORT=$IB_PORT
 
 for ((pow=MIN_POW2; pow<=MAX_POW2; pow++))
 do

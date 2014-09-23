@@ -4,10 +4,10 @@ set -u
 source $(cd "$(dirname $0)" && pwd)/env.sh
 
 $RAMCLOUD_ROOT/obj.$GIT_BRANCH/server \
-    -L infrc:host=$(hostname -s),port=1101,devport=$BFC_IB_PORT \
-    -x zk:221-1:2181 \
-    --totalMasterMemory 2048 \
+    -L infrc:host=shiva.cc.gt.atl.ga.us,port=1101,devport=$IB_PORT \
+    -x zk:$ZKSERVER:2181 \
+    --totalMasterMemory $MASTER_MEM \
     -f $RAMCLOUD_STORAGE_PATH \
-    --segmentFrames 64 \
+    --segmentFrames $SEG_FRAMES \
     -r $RAMCLOUD_REPLICATION
 

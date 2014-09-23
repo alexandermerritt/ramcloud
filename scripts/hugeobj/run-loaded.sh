@@ -11,7 +11,7 @@ BIN=$RAMCLOUD_ROOT/obj.$GIT_BRANCH/ClusterPerf
 [[ $# -ne 2 ]] && \
     echo "Usage: $0 numClients objSizeB" && exit 1
 
-export RAMCLOUD_IB_PORT=$BFC_IB_PORT
+export RAMCLOUD_IB_PORT=$IB_PORT
 
 numClients=$1
 objSize=$2

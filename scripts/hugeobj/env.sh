@@ -15,19 +15,28 @@ RAMCLOUD_SEGMENT_FRAMES=64
 RAMCLOUD_TOTAL_MEM=2048
 
 # port to use; ibv_devinfo
-BFC_IB_PORT=2
+IB_PORT=1
+
+# zookeeper
+ZKSERVER=ifrit
+
+# memory
+MASTER_MEM=2048
+SEG_FRAMES=64
 
 #
 # Parameters scripts sourcing this file will use
 #
 
 # location of checked-out copy of sources
-RAMCLOUD_ROOT=/home/merrital/src/ramcloud.git
+RAMCLOUD_ROOT=/opt/share/users/alex/ramcloud.git
 
 # if you enable persistence (-r N, N>0) maybe choose a place which isn't slow..
-RAMCLOUD_STORAGE_PATH=/scratch/$(whoami)/ramcloud.bak
+# assuming /run is tmpfs-mounted
+#RAMCLOUD_STORAGE_PATH=/run/ramcloud/ramcloud.bak
+RAMCLOUD_STORAGE_PATH=/tmp/ramcloud.bak
 
-GIT_BRANCH=hplabs
+GIT_BRANCH=hugeobj
 
 #
 # Environment variable hacks the code will read
