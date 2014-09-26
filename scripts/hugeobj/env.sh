@@ -1,5 +1,4 @@
 #! /usr/bin/env bash
-
 # Modify this to your environment.
 # Keep this script in same directory as the rc-* scripts.
 
@@ -27,6 +26,12 @@ SEG_FRAMES=64
 #
 # Parameters scripts sourcing this file will use
 #
+
+RAMCLOUD_COORD_DNS=ifrit.cc.gt.atl.ga.us
+
+SCRIPT_OUTPUT_DIR=$(cd "$(dirname $0)" && pwd)/data
+[[ ! -d $SCRIPT_OUTPUT_DIR ]] && \
+    mkdir -p $SCRIPT_OUTPUT_DIR
 
 # location of checked-out copy of sources
 RAMCLOUD_ROOT=/opt/share/users/alex/ramcloud.git
