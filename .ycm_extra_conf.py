@@ -38,7 +38,7 @@ flags = [
 '-Wshadow',
 '-Wwrite-strings',
 '-Weffc++',
-'-DNDEBUG',
+'-DDEBUG',
 # include directories
 '-isystem', '/usr/local/include/',
 '-isystem', '/usr/include/',
@@ -64,8 +64,6 @@ if os.path.exists( compilation_database_folder ):
   database = ycm_core.CompilationDatabase( compilation_database_folder )
 else:
   database = None
-
-SOURCE_EXTENSIONS = [ '.cpp', '.cxx', '.cc', '.c', '.m', '.mm' ]
 
 def DirectoryOfThisScript():
   return os.path.dirname( os.path.abspath( __file__ ) )
