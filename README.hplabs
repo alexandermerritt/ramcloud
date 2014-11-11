@@ -13,8 +13,11 @@ $ git checkout -b hplabs origin/hplabs
 
 ===== BULIDING =====
 
-To build:
-    make [DEBUG=no]
+To build (default is to build with debug symbols)
+
+    make [DEBUG=no] [-j[N]]
+
+Build breaks if you try to use clang.
 
 ===== INFINIBAND =====
 

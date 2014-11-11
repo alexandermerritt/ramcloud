@@ -3,7 +3,6 @@
 # Keep this script in same directory as the rc-* scripts.
 
 set -e
-set -u
 
 #
 # Parameters to the program(s)
@@ -11,7 +10,7 @@ set -u
 
 RAMCLOUD_REPLICATION=0
 RAMCLOUD_SEGMENT_FRAMES=64
-RAMCLOUD_TOTAL_MEM=2048
+RAMCLOUD_TOTAL_MEM=4096
 
 # port to use; ibv_devinfo
 IB_PORT=1
@@ -20,7 +19,7 @@ IB_PORT=1
 ZKSERVER=ifrit
 
 # memory
-MASTER_MEM=2048
+MASTER_MEM=4096
 SEG_FRAMES=64
 
 #
@@ -48,5 +47,5 @@ GIT_BRANCH=hugeobj
 #
 
 # timeout in us; the code too eagerly aborts and retries RPCs
-export RAMCLOUD_ABORT_TIMEOUT=100000
+export RAMCLOUD_ABORT_TIMEOUT=1000000
 

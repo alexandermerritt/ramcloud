@@ -3,8 +3,10 @@ set -e
 set -u
 source $(cd "$(dirname $0)" && pwd)/env.sh
 
-MIN_POW2=0
-MAX_POW2=23
+START_SIZE=8192
+#STOP_SIZE=$((1<<20))
+STOP_SIZE=8192
+INCR=4096
 BIN=$RAMCLOUD_ROOT/obj.$GIT_BRANCH/ClusterPerf
 
 [[ ! -e $BIN ]] && \
@@ -14,9 +16,8 @@ BIN=$RAMCLOUD_ROOT/obj.$GIT_BRANCH/ClusterPerf
 
 export RAMCLOUD_IB_PORT=$IB_PORT
 
-for ((pow=MIN_POW2; pow<=MAX_POW2; pow++))
+for ((size=$START_SIZE; size<=$STOP_SIZE; size=size+$INCR))
 do
-    size=$((1 << pow))
     filename="${SCRIPT_OUTPUT_DIR}/${size}B"
     if [[ -e $filename ]]; then
         [[ $(wc -l < $filename) -eq 0 ]] && rm -f $filename
@@ -28,9 +29,9 @@ do
         -C infrc:host=$RAMCLOUD_COORD_DNS,port=11100 \
         --testName readDist \
         --warmup 0 \
-        --count 1000 \
+        --count 1 \
         --size $size \
-        -l ERROR \
+        -l DEBUG \
         | tr ',' '\n' ) > $filename
     sleep 1
 done

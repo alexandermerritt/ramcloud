@@ -1319,6 +1319,8 @@ void fillTable(uint64_t tableId, int numObjects, uint16_t keyLength,
     double rate = numObjects/Cycles::toSeconds(writeTime);
     RAMCLOUD_LOG(NOTICE, "write rate for objects: %.1f kobjects/sec",
                 rate/1e03);
+
+    #undef BATCH_SIZE
 }
 
 //----------------------------------------------------------------------
@@ -2644,7 +2646,7 @@ void
 readDistRandom()
 {
     int numKeys = 2000000;
-    #define BATCH_SIZE 500
+    int BATCH_SIZE = 100;
     if (clientIndex != 0)
         return;
 
@@ -2652,6 +2654,9 @@ readDistRandom()
 
     char key[keyLength];
     Buffer input, value;
+
+    if (objectSize >= Segment::DEFAULT_SEGMENT_SIZE)
+        throw new std::runtime_error("object too large for segment");
 
     // Initialize keys and values
     MultiWriteObject** objects = new MultiWriteObject*[BATCH_SIZE];

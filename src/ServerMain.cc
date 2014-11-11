@@ -29,6 +29,25 @@
 #include "ShortMacros.h"
 #include "TransportManager.h"
 
+#include <stdio.h>
+#include <inttypes.h>
+#include <string.h>
+
+// take out '--' if in argv[1]
+static void rm_argstop(int *nargs, char *argv[])
+{
+    if (*nargs == 1)
+        return;
+    if (0 != strncmp(argv[1], "--", 3))
+        return;
+    (*nargs)--;
+    if (*nargs == 1)
+        return;
+    uintptr_t end = (uintptr_t)&argv[*nargs] + strlen(argv[*nargs]) + 1;
+    size_t      n = end - (uintptr_t)&argv[2];
+    memmove(&argv[1], &argv[2], n);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -36,6 +55,7 @@ main(int argc, char *argv[])
     signal(SIGTERM, Perf::terminationHandler);
     Logger::installCrashBacktraceHandlers();
     Context context(true);
+    rm_argstop(&argc, argv);
     try {
         ServerConfig config = ServerConfig::forExecution();
         string masterTotalMemory, hashTableMemory;

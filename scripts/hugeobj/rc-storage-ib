@@ -1,13 +1,24 @@
 #! /usr/bin/env bash
 set -e
-set -u
 source $(cd "$(dirname $0)" && pwd)/env.sh
 
-$RAMCLOUD_ROOT/obj.$GIT_BRANCH/server \
-    -L infrc:host=shiva.cc.gt.atl.ga.us,port=1101,devport=$IB_PORT \
+bin=$RAMCLOUD_ROOT/obj.$GIT_BRANCH/server
+args="-L infrc:host=shiva.cc.gt.atl.ga.us,port=1101,devport=$IB_PORT \
     -x zk:$ZKSERVER:2181 \
     --totalMasterMemory $MASTER_MEM \
     -f $RAMCLOUD_STORAGE_PATH \
     --segmentFrames $SEG_FRAMES \
-    -r $RAMCLOUD_REPLICATION
+    -r $RAMCLOUD_REPLICATION \
+    "
+[[ -z $DBG ]] && $bin $args
+[[ ! -z $DBG ]] && echo "Args: $args" && $DBG $bin
+
+#echo '' > lldb.cmds.storage
+#echo "target create $bin" >> lldb.cmds.storage
+#[[ $# -ne 0 ]] && echo "$@" >> lldb.cmds.storage
+#echo "process launch -- $args" >> lldb.cmds.storage
+#echo ''
+#echo '  command source lldb.cmds.storage'
+#echo ''
+#lldb
 
