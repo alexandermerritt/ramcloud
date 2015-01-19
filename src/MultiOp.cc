@@ -142,8 +142,7 @@ MultiOp::dispatchRequest(MultiOpObject* request,
         (*queue)->reserve(PartRpc::MAX_OBJECTS_PER_RPC);
         (*queue)->push_back(request);
         sessionQueues.insert(
-            std::make_pair<Transport::SessionRef,
-                std::shared_ptr<SessionQueue>>(*session,
+            std::make_pair(*session,
                     std::shared_ptr<SessionQueue>(*queue)));
     } else {
         *queue = iter->second.get();
