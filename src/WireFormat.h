@@ -120,7 +120,8 @@ enum Opcode {
     DROP_INDEX                = 66,
     DROP_INDEXLET_OWNERSHIP   = 67,
     TAKE_INDEXLET_OWNERSHIP   = 68,
-    ILLEGAL_RPC_TYPE          = 69, // 1 + the highest legitimate Opcode
+    GET_GLOB_CONFIG           = 69,
+    ILLEGAL_RPC_TYPE          = 70, // 1 + the highest legitimate Opcode
 };
 
 /**
@@ -599,6 +600,26 @@ struct FillWithTestData {
     } __attribute__((packed));
     struct Response {
         ResponseCommon common;
+    } __attribute__((packed));
+};
+
+struct GetGlobConfig {
+    static const Opcode opcode = GET_GLOB_CONFIG;
+    static const ServiceType service = COORDINATOR_SERVICE;
+    struct Request {
+        RequestCommon common;
+        uint64_t tableId;
+        KeyLength keyLength;        // Total size of key in bytes,
+                                    // which follows after this header.
+        uint8_t create;             // 1 to create the glob (if not exist).
+        uint32_t serverSpan;        // TODO(alex) not implemented
+        uint32_t globLength;
+    } __attribute__((packed));
+    struct Response {
+        ResponseCommon common;
+        uint32_t globConfigLength;  // Number of bytes in the glob map.
+                                    // The bytes of the glob map follow
+                                    // immediately after this header.
     } __attribute__((packed));
 };
 

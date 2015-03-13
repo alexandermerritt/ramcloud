@@ -64,6 +64,9 @@ class CoordinatorService : public Service {
     void dropIndex(const WireFormat::DropIndex::Request* reqHdr,
                    WireFormat::DropIndex::Response* respHdr,
                    Rpc* rpc);
+    void getGlobConfig(const WireFormat::GetGlobConfig::Request* reqHdr,
+                     WireFormat::GetGlobConfig::Response* rspHdr,
+                     Rpc* rpc);
     void splitTablet(const WireFormat::SplitTablet::Request* reqHdr,
                    WireFormat::SplitTablet::Response* respHdr,
                    Rpc* rpc);

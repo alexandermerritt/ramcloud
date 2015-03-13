@@ -2875,4 +2875,13 @@ WriteRpc::wait(uint64_t* version)
         ClientException::throwException(HERE, respHdr->common.status);
 }
 
+void
+RamCloud::writeGlob(uint64_t tableId,
+        const void* key, KeyLength keyLength,
+        const void* buf, uint32_t length)
+{
+    GlobWrite rpc(this, tableId, key, keyLength, buf, length);
+    rpc.wait();
+}
+
 }  // namespace RAMCloud

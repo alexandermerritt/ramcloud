@@ -209,6 +209,10 @@ CoordinatorService::dispatch(WireFormat::Opcode opcode,
             callHandler<WireFormat::ServerControlAll, CoordinatorService,
                         &CoordinatorService::serverControlAll>(rpc);
             break;
+        case WireFormat::GetGlobConfig::opcode:
+            callHandler<WireFormat::GetGlobConfig, CoordinatorService,
+                        &CoordinatorService::getGlobConfig>(rpc);
+            break;
         default:
             throw UnimplementedRequestError(HERE);
     }
@@ -281,6 +285,30 @@ CoordinatorService::dropIndex(const WireFormat::DropIndex::Request* reqHdr,
                               Rpc* rpc)
 {
     tableManager.dropIndex(reqHdr->tableId, reqHdr->indexId);
+}
+
+// TODO(alex) implementation missing
+void CoordinatorService::getGlobConfig(
+        const WireFormat::GetGlobConfig::Request* reqHdr,
+        WireFormat::GetGlobConfig::Response* rspHdr,
+        Rpc* rpc)
+{
+    Key key(reqHdr->tableId, *(rpc->requestPayload),
+            sizeof(*reqHdr), reqHdr->keyLength);
+    if (!tableManager.isGlob(key)) {
+        if (!reqHdr->create)
+            return;
+        tableManager.createGlob(key, 1); // TODO(alex) serverSpan
+    }
+
+    ProtoBuf::GlobConfig globConfig;
+    tableManager.serializeGlobConfig(&globConfig, key);
+#if 0
+    ProtoBuf::TableConfig tableConfig;
+    tableManager.serializeTableConfig(&tableConfig, reqHdr->tableId);
+    respHdr->tableConfigLength = serializeToResponse(rpc->replyPayload,
+                                                     &tableConfig);
+#endif
 }
 
 /**

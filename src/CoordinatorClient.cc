@@ -264,6 +264,43 @@ GetTableConfigRpc::wait(ProtoBuf::TableConfig* tableConfig)
                                 respHdr->tableConfigLength, tableConfig);
 }
 
+void
+CoordinatorClient::getGlobConfig(Context* context, Key& key,
+                                 ProtoBuf::GlobConfig* globConfig,
+                                 bool create, uint16_t length)
+{
+    GetGlobConfigRpc rpc(context, key, create, length);
+    rpc.wait(globConfig);
+}
+
+GetGlobConfigRpc::GetGlobConfigRpc(Context* context, Key& key,
+                                   bool create, uint16_t length)
+    : CoordinatorRpcWrapper(context,
+            sizeof(WireFormat::GetGlobConfig::Response))
+{
+    WireFormat::GetGlobConfig::Request* reqHdr(
+                    allocHeader<WireFormat::GetGlobConfig>());
+    reqHdr->tableId = key.getTableId();
+    reqHdr->keyLength = key.getStringKeyLength();
+    reqHdr->create = static_cast<uint8_t>(create);
+    if (create)
+        reqHdr->globLength = length;
+    request.appendCopy(key.getStringKey(), key.getStringKeyLength());
+    send();
+}
+
+void
+GetGlobConfigRpc::wait(ProtoBuf::GlobConfig* globConfig)
+{
+    waitInternal(context->dispatch);
+    const WireFormat::GetGlobConfig::Response* respHdr(
+               getResponseHeader<WireFormat::GetGlobConfig>());
+    if (respHdr->common.status != STATUS_OK)
+        ClientException::throwException(HERE, respHdr->common.status);
+    ProtoBuf::parseFromResponse(response, sizeof(*respHdr),
+                                respHdr->globConfigLength, globConfig);
+}
+
 /**
  * This method is invoked to notify the coordinator of problems communicating
  * with a particular server, suggesting that the server may have crashed.  The

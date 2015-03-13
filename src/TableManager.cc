@@ -20,6 +20,7 @@
 #include "ShortMacros.h"
 #include "TableManager.h"
 #include "TableManager.pb.h"
+#include "GlobConfig.pb.h"
 
 namespace RAMCloud {
 
@@ -711,6 +712,41 @@ TableManager::serializeTableConfig(ProtoBuf::TableConfig* tableConfig,
             }
         }
     }
+}
+
+bool
+TableManager::isGlob(Key& key)
+{
+    Lock lock(mutex);
+    Glob* glob = nullptr;
+    findGlob(lock, key, &glob);
+    return !!glob;
+}
+
+void
+TableManager::findGlob(Lock& lock, Key& key, Glob** glob)
+{
+    auto iter = globMap.find(key.getHash());
+    if ((iter != globMap.end()) && *glob)
+        *glob = iter->second;
+}
+
+void
+TableManager::serializeGlobConfig(ProtoBuf::GlobConfig* globConfig, Key& key)
+{
+    Lock lock(mutex);
+    Glob* glob = nullptr;
+    findGlob(lock, key, &glob);
+    if (!glob)
+        return;
+    // TODO(alex) implementation missing
+}
+
+void
+TableManager::createGlob(Key& key, uint32_t serverSpan)
+{
+    Lock lock(mutex);
+    Glob *glob = new Glob(key
 }
 
 /**

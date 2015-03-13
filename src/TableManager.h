@@ -73,6 +73,8 @@ class TableManager {
     void createIndex(uint64_t tableId, uint8_t indexId, uint8_t indexType,
             uint8_t numIndexlets);
     uint64_t createTable(const char* name, uint32_t serverSpan);
+    bool isGlob(Key& key);
+    void createGlob(Key& key, uint32_t serverSpan);
     string debugString(bool shortForm = false);
     void dropIndex(uint64_t tableId, uint8_t indexId);
     void dropTable(const char* name);
@@ -92,6 +94,7 @@ class TableManager {
     void recover(uint64_t lastCompletedUpdate);
     void serializeTableConfig(ProtoBuf::TableConfig* tableConfig,
             uint64_t tableId);
+    void serializeGlobConfig(ProtoBuf::GlobConfig* globConfig, Key& key);
     void splitTablet(const char* name, uint64_t splitKeyHash);
     void splitRecoveringTablet(uint64_t tableId, uint64_t splitKeyHash);
     void tabletRecovered(uint64_t tableId, uint64_t startKeyHash,
@@ -199,6 +202,27 @@ class TableManager {
         IndexMap indexMap;
     };
 
+    struct Glob {
+        Glob(Key& key);
+        ~Glob();
+
+        struct Segment {
+            uint64_t offset;
+            uint32_t length;
+            string keyName;
+        };
+        typedef uint64_t offset_t;
+
+        string keyName;
+        uint64_t tableId;
+        uint32_t length;
+        std::map<offset_t, Segment> segments;
+    };
+
+    /// multimap b/c this keeps track of objects across all tables;
+    /// objects may have the same keys
+    typedef std::multimap<KeyHash, Glob*> globMap;
+
     /**
      * Provides monitor-style protection for all operations on the tablet map.
      * A Lock for this mutex must be held to read or modify any state in
@@ -241,6 +265,7 @@ class TableManager {
     void dropIndex(const Lock& lock, uint64_t tableId, uint8_t indexId);
     void dropTable(const Lock& lock, const char* name);
     Tablet* findTablet(const Lock& lock, Table* table, uint64_t keyHash);
+    void findGlob(Lock& lock, Key& key, Glob** glob = nullptr);
     void notifyCreate(const Lock& lock, Table* table);
     void notifyCreateIndex(const Lock& lock, Index* index);
     void notifyDropTable(const Lock& lock, ProtoBuf::Table* info);

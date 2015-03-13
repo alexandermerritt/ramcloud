@@ -16,7 +16,7 @@
 #ifndef RAMCLOUD_DISPATCH_H
 #define RAMCLOUD_DISPATCH_H
 
-#if __GNUC__ >= 4 && __GNUC_MINOR__ >= 5
+#if (__GNUC__ >= 4 && __GNUC_MINOR__ >= 5) || __clang__
 #include <atomic>
 #else
 #include <cstdatomic>

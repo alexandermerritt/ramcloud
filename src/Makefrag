@@ -160,6 +160,7 @@ SHARED_SRCFILES := \
 		   $(OBJDIR)/Indexlets.pb.cc \
 		   $(OBJDIR)/RecoveryPartition.pb.cc \
 		   $(OBJDIR)/TableConfig.pb.cc \
+		   $(OBJDIR)/GlobConfig.pb.cc \
 		   $(NULL)
 
 SHARED_OBJFILES := $(SHARED_SRCFILES)

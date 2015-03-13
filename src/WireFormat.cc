@@ -107,6 +107,7 @@ opcodeSymbol(uint32_t opcode)
         case ILLEGAL_RPC_TYPE:           return "ILLEGAL_RPC_TYPE";
         case INSERT_INDEX_ENTRY:         return "INSERT_INDEX_ENTRY";
         case REMOVE_INDEX_ENTRY:         return "REMOVE_INDEX_ENTRY";
+        case GET_GLOB_CONFIG:            return "GET_GLOB_CONFIG";
     }
 
     // Never heard of this RPC; return the numeric value. The shared buffer

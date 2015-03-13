@@ -33,6 +33,25 @@ class MultiWrite : public MultiOp {
     bool readResponse(MultiOpObject* request, Buffer* response,
                       uint32_t* respOffset);
 };
+
+/**
+ * Class which uses MultiWrite. Reason: MultiWrite constructor requires knowing
+ * the request objects, and we cannot compose these before calling MultiWrite's
+ * constructor, as it must be invoked before constructing any subclass
+ * inheriting from it.
+ */
+class GlobWrite {
+  PUBLIC:
+    GlobWrite(RamCloud* ramcloud, uint64_t tableId, const void* key,
+              KeyLength keyLength, const void* buf, uint32_t length);
+    void wait(void);
+    
+  PRIVATE:
+    Tub<MultiWrite> multi;
+};
+
+// TODO(alex) read, rm, etc. funcs
+
 } // end RAMCloud
 
 #endif /* MULTIWRITE_H */

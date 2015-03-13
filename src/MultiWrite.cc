@@ -128,5 +128,46 @@ MultiWrite::readResponse(MultiOpObject* request,
     return false;
 }
 
+GlobWrite::GlobWrite(RamCloud* ramcloud, uint64_t tableId,
+                     const void* _key, uint16_t keyLength,
+                     const void* buf, uint32_t length)
+    : multi()
+{
+    // Talk to coordinator to request number of glob segments.
+    // For object RPCs, this work would normally defer to the
+    // ObjectRpcWrapper::send where the ObjectFinder class talks to the
+    // coordinator to locate object tablets and return session objects.
+    ProtoBuf::GlobConfig globConfig;
+    Key key(tableId, _key, keyLength);
+    LOG(NOTICE, "Sending request to coord for glob config");
+    CoordinatorClient::getGlobConfig(ramcloud->clientContext,
+                                     key, &globConfig, true, length);
+    LOG(NOTICE, "Received response from coord for glob config");
+    // TODO(alex) continue implementation
+    // deserialize response protobuf
+    // use it to create the array of multiwrite objects
+    // construct the multi object and issue it
+#if 0
+    LOG(NOTICE, "Sending request to coord for glob config");
+    int nsegments = globConfig.segments_size();
+    foreach (const ProtoBuf::GlobConfig::Segment& segment,
+             globConfig.segments()) {
+        
+    }
+
+    // then construct the multiwriteobject array, computing offsets
+    // for each
+    multi.construct(ramcloud, requests, n);
+#endif
+}
+
+void
+GlobWrite::wait(void)
+{
+    if (!multi)
+        throw ClientException(HERE, STATUS_INTERNAL_ERROR);
+    multi->wait();
+}
+
 } // end RAMCloud
 

@@ -154,6 +154,9 @@ class RamCloud {
     void write(uint64_t tableId, uint8_t numKeys, KeyInfo *keyInfo,
             const char* value, const RejectRules* rejectRules = NULL,
             uint64_t* version = NULL, bool async = false);
+    
+    void writeGlob(uint64_t tableId, const void* key,
+            KeyLength keyLength, const void* buf, uint32_t length);
 
     void poll();
     explicit RamCloud(const char* serviceLocator,

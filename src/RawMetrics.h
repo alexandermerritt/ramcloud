@@ -18,7 +18,7 @@
 #ifndef RAMCLOUD_RAWMETRICS_H
 #define RAMCLOUD_RAWMETRICS_H
 
-#if __GNUC__ >= 4 && __GNUC_MINOR__ >= 5
+#if (__GNUC__ >= 4 && __GNUC_MINOR__ >= 5) || __clang__
 #include <atomic>
 #else
 #include <cstdatomic>

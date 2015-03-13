@@ -1,0 +1,506 @@
+diff --git a/src/ClusterPerf.cc b/src/ClusterPerf.cc
+index 2d051cb..2a19bc8 100644
+--- a/src/ClusterPerf.cc
++++ b/src/ClusterPerf.cc
+@@ -3382,6 +3382,17 @@ writeAsyncSync()
+     delete garbage;
+ }
+ 
++void
++writeGlob()
++{
++    const char tableName[] = "globTable";
++    const char keyName[] = "globKey";
++    const char value[] = "very tiny string";
++    uint64_t tableId = cluster->createTable(tableName, 1);
++    cluster->writeGlob(tableId, keyName, strlen(keyName) + 1,
++            value, strlen(value) + 1);
++}
++
+ // The following struct and table define each performance test in terms of
+ // a string name and a function that implements the test.
+ struct TestInfo {
+@@ -3414,6 +3425,7 @@ TestInfo tests[] = {
+     {"threadLoaded", threadLoaded},
+     {"writeVaryingKeyLength", writeVaryingKeyLength},
+     {"writeAsyncSync", writeAsyncSync},
++    {"writeGlob", writeGlob},
+ };
+ 
+ int
+diff --git a/src/CoordinatorClient.cc b/src/CoordinatorClient.cc
+index 2952e2f..cdc0c53 100644
+--- a/src/CoordinatorClient.cc
++++ b/src/CoordinatorClient.cc
+@@ -264,6 +264,42 @@ GetTableConfigRpc::wait(ProtoBuf::TableConfig* tableConfig)
+                                 respHdr->tableConfigLength, tableConfig);
+ }
+ 
++void
++CoordinatorClient::getGlobConfig(Context* context, Key& key,
++                                 ProtoBuf::GlobConfig* globConfig,
++                                 bool create, uint16_t length)
++{
++    GetGlobConfigRpc rpc(context, key, create, length);
++    rpc.wait(globConfig);
++}
++
++GetGlobConfigRpc::GetGlobConfigRpc(Context* context, Key& key,
++                                   bool create, uint16_t length)
++    : CoordinatorRpcWrapper(context,
++            sizeof(WireFormat::GetGlobConfig::Response))
++{
++    WireFormat::GetGlobConfig::Request* reqHdr(
++                    allocHeader<WireFormat::GetGlobConfig>());
++    reqHdr->tableId = key.getTableId();
++    reqHdr->create = static_cast<uint8_t>(create);
++    if (create)
++        reqHdr->keyLength = length;
++    request.appendCopy(key.getStringKey(), key.getStringKeyLength());
++    send();
++}
++
++void
++GetGlobConfigRpc::wait(ProtoBuf::GlobConfig* globConfig)
++{
++    waitInternal(context->dispatch);
++    const WireFormat::GetGlobConfig::Response* respHdr(
++               getResponseHeader<WireFormat::GetGlobConfig>());
++    if (respHdr->common.status != STATUS_OK)
++        ClientException::throwException(HERE, respHdr->common.status);
++    ProtoBuf::parseFromResponse(response, sizeof(*respHdr),
++                                respHdr->globConfigLength, globConfig);
++}
++
+ /**
+  * This method is invoked to notify the coordinator of problems communicating
+  * with a particular server, suggesting that the server may have crashed.  The
+diff --git a/src/CoordinatorClient.h b/src/CoordinatorClient.h
+index d8bb421..d36bc0e 100644
+--- a/src/CoordinatorClient.h
++++ b/src/CoordinatorClient.h
+@@ -20,6 +20,7 @@
+ #include "ServerList.pb.h"
+ #include "RecoveryPartition.pb.h"
+ #include "TableConfig.pb.h"
++#include "GlobConfig.pb.h"
+ 
+ #include "Common.h"
+ #include "ClientException.h"
+@@ -27,6 +28,7 @@
+ #include "ServiceMask.h"
+ #include "ServerId.h"
+ #include "TransportManager.h"
++#include "Key.h"
+ 
+ namespace RAMCloud {
+ 
+@@ -49,6 +51,9 @@ class CoordinatorClient {
+             ProtoBuf::ServerList* serverList);
+     static void getTableConfig(Context* context,
+             uint64_t tableId, ProtoBuf::TableConfig* tableConfig);
++    static void getGlobConfig(Context* context,
++            Key& key, ProtoBuf::GlobConfig* globConfig,
++            bool create, uint16_t length = 0);
+     static void hintServerCrashed(Context* context, ServerId serverId);
+     static void reassignTabletOwnership(Context* context, uint64_t tableId,
+             uint64_t firstKey, uint64_t lastKey, ServerId newOwnerId,
+@@ -111,6 +116,17 @@ class GetTableConfigRpc : public CoordinatorRpcWrapper {
+     DISALLOW_COPY_AND_ASSIGN(GetTableConfigRpc);
+ };
+ 
++class GetGlobConfigRpc : public CoordinatorRpcWrapper {
++    public:
++    explicit GetGlobConfigRpc(Context* context, Key& key,
++                              bool create, uint16_t length = 0);
++    ~GetGlobConfigRpc() {}
++    void wait(ProtoBuf::GlobConfig* globConfig);
++    
++    PRIVATE:
++    DISALLOW_COPY_AND_ASSIGN(GetGlobConfigRpc);
++};
++
+ /**
+  * Encapsulates the state of a CoordinatorClient::hintServerCrashed
+  * request, allowing it to execute asynchronously.
+diff --git a/src/CoordinatorService.cc b/src/CoordinatorService.cc
+index bfc8f3a..61c0cd6 100644
+--- a/src/CoordinatorService.cc
++++ b/src/CoordinatorService.cc
+@@ -209,6 +209,10 @@ CoordinatorService::dispatch(WireFormat::Opcode opcode,
+             callHandler<WireFormat::ServerControlAll, CoordinatorService,
+                         &CoordinatorService::serverControlAll>(rpc);
+             break;
++        case WireFormat::GetGlobConfig::opcode:
++            callHandler<WireFormat::GetGlobConfig, CoordinatorService,
++                        &CoordinatorService::getGlobConfig>(rpc);
++            break;
+         default:
+             throw UnimplementedRequestError(HERE);
+     }
+@@ -283,6 +287,19 @@ CoordinatorService::dropIndex(const WireFormat::DropIndex::Request* reqHdr,
+     tableManager.dropIndex(reqHdr->tableId, reqHdr->indexId);
+ }
+ 
++void CoordinatorService::getGlobConfig(
++        const WireFormat::GetGlobConfig::Request* reqHdr,
++        WireFormat::GetGlobConfig::Response* rspHdr,
++        Rpc* rpc)
++{
++    const char* keyName = getString(rpc->requestPayload,
++            sizeof(*reqHdr), reqHdr->keyLength);
++    LOG(NOTICE, "Request for configuration of glob: %s", keyName);
++    // locate glob; if not found, create if specified
++    // pack glob info into protobuf structure
++    // TODO(alex) implementation missing
++}
++
+ /**
+  * Top-level server method to handle the SPLIT_TABLET request.
+  * \copydetails Service::ping
+diff --git a/src/CoordinatorService.h b/src/CoordinatorService.h
+index 3e4547d..3951ab5 100644
+--- a/src/CoordinatorService.h
++++ b/src/CoordinatorService.h
+@@ -64,6 +64,9 @@ class CoordinatorService : public Service {
+     void dropIndex(const WireFormat::DropIndex::Request* reqHdr,
+                    WireFormat::DropIndex::Response* respHdr,
+                    Rpc* rpc);
++    void getGlobConfig(const WireFormat::GetGlobConfig::Request* reqHdr,
++                     WireFormat::GetGlobConfig::Response* rspHdr,
++                     Rpc* rpc);
+     void splitTablet(const WireFormat::SplitTablet::Request* reqHdr,
+                    WireFormat::SplitTablet::Response* respHdr,
+                    Rpc* rpc);
+diff --git a/src/Dispatch.h b/src/Dispatch.h
+index b022cec..7a1446f 100644
+--- a/src/Dispatch.h
++++ b/src/Dispatch.h
+@@ -16,7 +16,7 @@
+ #ifndef RAMCLOUD_DISPATCH_H
+ #define RAMCLOUD_DISPATCH_H
+ 
+-#if __GNUC__ >= 4 && __GNUC_MINOR__ >= 5
++#if (__GNUC__ >= 4 && __GNUC_MINOR__ >= 5) || __clang__
+ #include <atomic>
+ #else
+ #include <cstdatomic>
+diff --git a/src/GlobConfig.proto b/src/GlobConfig.proto
+new file mode 100644
+index 0000000..2b7cebe
+--- /dev/null
++++ b/src/GlobConfig.proto
+@@ -0,0 +1,15 @@
++package RAMCloud.ProtoBuf;
++
++message GlobConfig {
++
++  message Segment {
++    optional uint64 offset = 1;
++    optional uint64 length = 2;
++    optional string key_name = 3;
++  }
++
++  optional string key_name = 1;
++  optional uint64 table_id = 2;
++  optional uint32 length = 3;
++  repeated Segment segments = 4;
++}
+diff --git a/src/LogSegment.h b/src/LogSegment.h
+index 537811d..06fe214 100644
+--- a/src/LogSegment.h
++++ b/src/LogSegment.h
+@@ -16,7 +16,7 @@
+ #ifndef RAMCLOUD_LOGSEGMENT_H
+ #define RAMCLOUD_LOGSEGMENT_H
+ 
+-#if __GNUC__ >= 4 && __GNUC_MINOR__ >= 5
++#if (__GNUC__ >= 4 && __GNUC_MINOR__ >= 5) || __clang__
+ #include <atomic>
+ #else
+ #include <cstdatomic>
+diff --git a/src/Makefrag b/src/Makefrag
+index 9bb64ce..cd455a5 100644
+--- a/src/Makefrag
++++ b/src/Makefrag
+@@ -160,6 +160,7 @@ SHARED_SRCFILES := \
+ 		   $(OBJDIR)/Indexlets.pb.cc \
+ 		   $(OBJDIR)/RecoveryPartition.pb.cc \
+ 		   $(OBJDIR)/TableConfig.pb.cc \
++		   $(OBJDIR)/GlobConfig.pb.cc \
+ 		   $(NULL)
+ 
+ SHARED_OBJFILES := $(SHARED_SRCFILES)
+diff --git a/src/MakefragClient b/src/MakefragClient
+index 41e3a1c..d8e415b 100644
+--- a/src/MakefragClient
++++ b/src/MakefragClient
+@@ -110,6 +110,7 @@ CLIENT_SRCFILES := \
+ 		   $(OBJDIR)/Indexlets.pb.cc \
+ 		   $(OBJDIR)/RecoveryPartition.pb.cc \
+ 		   $(OBJDIR)/TableConfig.pb.cc \
++		   $(OBJDIR)/GlobConfig.pb.cc \
+ 		   $(NULL)
+ 
+ CLIENT_OBJFILES := $(CLIENT_SRCFILES)
+diff --git a/src/MultiWrite.cc b/src/MultiWrite.cc
+index b53b91c..d4766f4 100644
+--- a/src/MultiWrite.cc
++++ b/src/MultiWrite.cc
+@@ -128,5 +128,40 @@ MultiWrite::readResponse(MultiOpObject* request,
+     return false;
+ }
+ 
++GlobWrite::GlobWrite(RamCloud* ramcloud, uint64_t tableId,
++                     const void* _key, uint16_t keyLength,
++                     const void* buf, uint32_t length)
++    : multi()
++{
++    // Talk to coordinator to request number of glob segments.
++    // For object RPCs, this work would normally defer to the
++    // ObjectRpcWrapper::send where the ObjectFinder class talks to the
++    // coordinator to locate object tablets and return session objects.
++    ProtoBuf::GlobConfig globConfig;
++    Key key(tableId, _key, keyLength);
++    LOG(NOTICE, "Sending request to coord for glob config");
++    CoordinatorClient::getGlobConfig(ramcloud->clientContext,
++                                     key, &globConfig, true, length);
++#if 0
++    LOG(NOTICE, "Sending request to coord for glob config");
++    int nsegments = globConfig.segments_size();
++    foreach (const ProtoBuf::GlobConfig::Segment& segment,
++             globConfig.segments()) {
++        
++    }
++
++    // then construct the multiwriteobject array, computing offsets for each
++    multi.construct(ramcloud, requests, n);
++#endif
++}
++
++void
++GlobWrite::wait(void)
++{
++    if (!multi)
++        throw ClientException(HERE, STATUS_INTERNAL_ERROR);
++    multi->wait();
++}
++
+ } // end RAMCloud
+ 
+diff --git a/src/MultiWrite.h b/src/MultiWrite.h
+index 51a907b..b352e51 100644
+--- a/src/MultiWrite.h
++++ b/src/MultiWrite.h
+@@ -33,6 +33,25 @@ class MultiWrite : public MultiOp {
+     bool readResponse(MultiOpObject* request, Buffer* response,
+                       uint32_t* respOffset);
+ };
++
++/**
++ * Class which uses MultiWrite. Reason: MultiWrite constructor requires knowing
++ * the request objects, and we cannot compose these before calling MultiWrite's
++ * constructor, as it must be invoked before constructing any subclass
++ * inheriting from it.
++ */
++class GlobWrite {
++  PUBLIC:
++    GlobWrite(RamCloud* ramcloud, uint64_t tableId, const void* key,
++              uint16_t keyLength, const void* buf, uint32_t length);
++    void wait(void);
++    
++  PRIVATE:
++    Tub<MultiWrite> multi;
++};
++
++// TODO(alex) read, rm, etc. funcs
++
+ } // end RAMCloud
+ 
+ #endif /* MULTIWRITE_H */
+diff --git a/src/RamCloud.cc b/src/RamCloud.cc
+index 68bb775..b8f0eee 100644
+--- a/src/RamCloud.cc
++++ b/src/RamCloud.cc
+@@ -2875,4 +2875,12 @@ WriteRpc::wait(uint64_t* version)
+         ClientException::throwException(HERE, respHdr->common.status);
+ }
+ 
++void
++RamCloud::writeGlob(uint64_t tableId, const void* key, uint16_t keyLength,
++          const void* buf, uint32_t length)
++{
++    GlobWrite rpc(this, tableId, key, keyLength, buf, length);
++    rpc.wait();
++}
++
+ }  // namespace RAMCloud
+diff --git a/src/RamCloud.h b/src/RamCloud.h
+index e74dbf0..2c2c36f 100644
+--- a/src/RamCloud.h
++++ b/src/RamCloud.h
+@@ -154,6 +154,9 @@ class RamCloud {
+     void write(uint64_t tableId, uint8_t numKeys, KeyInfo *keyInfo,
+             const char* value, const RejectRules* rejectRules = NULL,
+             uint64_t* version = NULL, bool async = false);
++    
++    void writeGlob(uint64_t tableId, const void* key, uint16_t keyLength,
++                   const void* buf, uint32_t length);
+ 
+     void poll();
+     explicit RamCloud(const char* serviceLocator,
+diff --git a/src/RawMetrics.h b/src/RawMetrics.h
+index 3c30b46..fa7c0d7 100644
+--- a/src/RawMetrics.h
++++ b/src/RawMetrics.h
+@@ -18,7 +18,7 @@
+ #ifndef RAMCLOUD_RAWMETRICS_H
+ #define RAMCLOUD_RAWMETRICS_H
+ 
+-#if __GNUC__ >= 4 && __GNUC_MINOR__ >= 5
++#if (__GNUC__ >= 4 && __GNUC_MINOR__ >= 5) || __clang__
+ #include <atomic>
+ #else
+ #include <cstdatomic>
+diff --git a/src/Segment.h b/src/Segment.h
+index a4794eb..159a99c 100644
+--- a/src/Segment.h
++++ b/src/Segment.h
+@@ -83,7 +83,7 @@ class Segment {
+     // can't use more than 1M, see http://bugs.kde.org/show_bug.cgi?id=203877
+     enum { DEFAULT_SEGMENT_SIZE = 1 * 1024 * 1024 };
+ #else
+-    enum { DEFAULT_SEGMENT_SIZE = 16 * 1024 * 1024 }; // [amm] allow larger object sizes
++    enum { DEFAULT_SEGMENT_SIZE = 8 * 1024 * 1024 };
+ #endif
+ 
+   PRIVATE:
+diff --git a/src/SegmentManager.h b/src/SegmentManager.h
+index f37c430..9108bd8 100644
+--- a/src/SegmentManager.h
++++ b/src/SegmentManager.h
+@@ -16,7 +16,7 @@
+ #ifndef RAMCLOUD_SEGMENTMANAGER_H
+ #define RAMCLOUD_SEGMENTMANAGER_H
+ 
+-#if __GNUC__ >= 4 && __GNUC_MINOR__ >= 5
++#if (__GNUC__ >= 4 && __GNUC_MINOR__ >= 5) || __clang__
+ #include <atomic>
+ #else
+ #include <cstdatomic>
+diff --git a/src/TableManager.cc b/src/TableManager.cc
+index c3ab384..eac0a0b 100644
+--- a/src/TableManager.cc
++++ b/src/TableManager.cc
+@@ -20,6 +20,7 @@
+ #include "ShortMacros.h"
+ #include "TableManager.h"
+ #include "TableManager.pb.h"
++#include "GlobConfig.pb.h"
+ 
+ namespace RAMCloud {
+ 
+@@ -713,6 +714,12 @@ TableManager::serializeTableConfig(ProtoBuf::TableConfig* tableConfig,
+     }
+ }
+ 
++void serializeGlobConfig(ProtoBuf::GlobConfig* globConfig,
++        uint64_t tableId, void* key, uint16_t keyLength)
++{
++    // TODO(alex)
++}
++
+ /**
+  * Split a tablet into two disjoint tablets at a specific key hash. Check
+  * if the split already exists, in which case, just return. Also informs
+diff --git a/src/TableManager.h b/src/TableManager.h
+index 5bd9915..98deb13 100644
+--- a/src/TableManager.h
++++ b/src/TableManager.h
+@@ -92,6 +92,8 @@ class TableManager {
+     void recover(uint64_t lastCompletedUpdate);
+     void serializeTableConfig(ProtoBuf::TableConfig* tableConfig,
+             uint64_t tableId);
++    void serializeGlobConfig(ProtoBuf::GlobConfig* globConfig,
++            uint64_t tableId, void* key, uint16_t keyLength);
+     void splitTablet(const char* name, uint64_t splitKeyHash);
+     void splitRecoveringTablet(uint64_t tableId, uint64_t splitKeyHash);
+     void tabletRecovered(uint64_t tableId, uint64_t startKeyHash,
+@@ -199,6 +201,26 @@ class TableManager {
+         IndexMap indexMap;
+     };
+ 
++    
++    struct Glob {
++        Glob(Key& key, uint64_t tableId);
++        ~Glob();
++
++        struct Segment {
++            uint64_t offset;
++            uint32_t length;
++            string keyName;
++        };
++
++        string keyName;
++        uint64_t tableId;
++        uint32_t length;
++        // sort by offset
++        std::map<uint64_t, Segment> segments;
++    };
++
++    typedef std::map<KeyHash, Glob*> globMap;
++
+     /**
+      * Provides monitor-style protection for all operations on the tablet map.
+      * A Lock for this mutex must be held to read or modify any state in
+diff --git a/src/WireFormat.cc b/src/WireFormat.cc
+index 13c0717..283e123 100644
+--- a/src/WireFormat.cc
++++ b/src/WireFormat.cc
+@@ -107,6 +107,7 @@ opcodeSymbol(uint32_t opcode)
+         case ILLEGAL_RPC_TYPE:           return "ILLEGAL_RPC_TYPE";
+         case INSERT_INDEX_ENTRY:         return "INSERT_INDEX_ENTRY";
+         case REMOVE_INDEX_ENTRY:         return "REMOVE_INDEX_ENTRY";
++        case GET_GLOB_CONFIG:            return "GET_GLOB_CONFIG";
+     }
+ 
+     // Never heard of this RPC; return the numeric value. The shared buffer
+diff --git a/src/WireFormat.h b/src/WireFormat.h
+index 53d0f93..85a46d9 100644
+--- a/src/WireFormat.h
++++ b/src/WireFormat.h
+@@ -120,7 +120,8 @@ enum Opcode {
+     DROP_INDEX                = 66,
+     DROP_INDEXLET_OWNERSHIP   = 67,
+     TAKE_INDEXLET_OWNERSHIP   = 68,
+-    ILLEGAL_RPC_TYPE          = 69, // 1 + the highest legitimate Opcode
++    GET_GLOB_CONFIG           = 69,
++    ILLEGAL_RPC_TYPE          = 70, // 1 + the highest legitimate Opcode
+ };
+ 
+ /**
+@@ -602,6 +603,24 @@ struct FillWithTestData {
+     } __attribute__((packed));
+ };
+ 
++struct GetGlobConfig {
++    static const Opcode opcode = GET_GLOB_CONFIG;
++    static const ServiceType service = COORDINATOR_SERVICE;
++    struct Request {
++        RequestCommon common;
++        uint64_t tableId;
++        uint32_t keyLength;         // Total size of key in bytes,
++                                    // which follows after this header.
++        uint8_t create;             // 1 to create the glob (if not exist).
++    } __attribute__((packed));
++    struct Response {
++        ResponseCommon common;
++        uint32_t globConfigLength;  // Number of bytes in the glob map.
++                                    // The bytes of the glob map follow
++                                    // immediately after this header.
++    } __attribute__((packed));
++};
++
+ struct GetHeadOfLog {
+     static const Opcode opcode = GET_HEAD_OF_LOG;
+     static const ServiceType service = MASTER_SERVICE;

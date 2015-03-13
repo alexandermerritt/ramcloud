@@ -20,6 +20,7 @@
 #include "ServerList.pb.h"
 #include "RecoveryPartition.pb.h"
 #include "TableConfig.pb.h"
+#include "GlobConfig.pb.h"
 
 #include "Common.h"
 #include "ClientException.h"
@@ -27,6 +28,7 @@
 #include "ServiceMask.h"
 #include "ServerId.h"
 #include "TransportManager.h"
+#include "Key.h"
 
 namespace RAMCloud {
 
@@ -49,6 +51,9 @@ class CoordinatorClient {
             ProtoBuf::ServerList* serverList);
     static void getTableConfig(Context* context,
             uint64_t tableId, ProtoBuf::TableConfig* tableConfig);
+    static void getGlobConfig(Context* context,
+            Key& key, ProtoBuf::GlobConfig* globConfig,
+            bool create, uint16_t length = 0);
     static void hintServerCrashed(Context* context, ServerId serverId);
     static void reassignTabletOwnership(Context* context, uint64_t tableId,
             uint64_t firstKey, uint64_t lastKey, ServerId newOwnerId,
@@ -109,6 +114,17 @@ class GetTableConfigRpc : public CoordinatorRpcWrapper {
 
     PRIVATE:
     DISALLOW_COPY_AND_ASSIGN(GetTableConfigRpc);
+};
+
+class GetGlobConfigRpc : public CoordinatorRpcWrapper {
+    public:
+    explicit GetGlobConfigRpc(Context* context, Key& key,
+                              bool create, uint16_t length = 0);
+    ~GetGlobConfigRpc() {}
+    void wait(ProtoBuf::GlobConfig* globConfig);
+    
+    PRIVATE:
+    DISALLOW_COPY_AND_ASSIGN(GetGlobConfigRpc);
 };
 
 /**

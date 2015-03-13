@@ -3382,6 +3382,17 @@ writeAsyncSync()
     delete garbage;
 }
 
+void
+writeGlob()
+{
+    const char tableName[] = "globTable";
+    const char keyName[] = "globKey";
+    const char value[] = "very tiny string";
+    uint64_t tableId = cluster->createTable(tableName, 1);
+    cluster->writeGlob(tableId, keyName, strlen(keyName) + 1,
+            value, strlen(value) + 1);
+}
+
 // The following struct and table define each performance test in terms of
 // a string name and a function that implements the test.
 struct TestInfo {
@@ -3414,6 +3425,7 @@ TestInfo tests[] = {
     {"threadLoaded", threadLoaded},
     {"writeVaryingKeyLength", writeVaryingKeyLength},
     {"writeAsyncSync", writeAsyncSync},
+    {"writeGlob", writeGlob},
 };
 
 int

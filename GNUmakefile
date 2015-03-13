@@ -31,7 +31,7 @@ ZOOKEEPER_DIR ?= /usr/share/zookeeper
 ifeq ($(DEBUG),yes)
 BASECFLAGS := -g
 OPTFLAG	 :=
-DEBUGFLAGS := -DTESTING=1 -fno-builtin
+DEBUGFLAGS := -DTESTING=1 -fno-builtin -Wno-sign-conversion
 else
 BASECFLAGS := -g
 OPTFLAG := -O3
@@ -54,7 +54,7 @@ CWARNS   := $(COMWARNS) -Wmissing-prototypes -Wmissing-declarations -Wshadow \
 		-Wbad-function-cast
 CXXWARNS := $(COMWARNS) -Wno-non-template-friend -Woverloaded-virtual \
 		-Wcast-qual \
-		-Wcast-align -Wconversion
+		-Wcast-align # -Wconversion
 ifeq ($(COMPILER),gnu)
 CXXWARNS += -Weffc++
 endif
@@ -73,8 +73,8 @@ endif
 
 INCLUDES := -I$(TOP)/src -I$(TOP)/$(OBJDIR) -I$(GTEST_DIR)/include -I/usr/local/openonload-201405/src/include 
 
-CC ?= gcc
-CXX ?= g++
+CC ?= gcc-4.8
+CXX ?= g++-4.8
 AR ?= ar
 PERL ?= perl
 PYTHON ?= python
@@ -255,6 +255,19 @@ startZoo:
 
 stopZoo:
 	$(ZOOKEEPER_DIR)/bin/zkServer.sh stop
+
+PREFIX ?= /usr/local
+install:
+	mkdir -p $(PREFIX)/include/ramcloud
+	cp src/RamCloud.h $(PREFIX)/include/ramcloud
+	cp $(OBJDIR)/libramcloud.a $(PREFIX)/lib
+	cp $(OBJDIR)/libramcloud.so $(PREFIX)/lib
+	ldconfig
+
+uninstall:
+	rm -rf $(PREFIX)/include/ramcloud
+	rm -f $(PREFIX)/lib/libramcloud.a
+	rm -f $(PREFIX)/lib/libramcloud.so
 
 .PHONY: all always clean check doc docs docs-clean tags tags-clean test tests \
         logcabin startZoo stopZoo

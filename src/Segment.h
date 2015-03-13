@@ -83,7 +83,7 @@ class Segment {
     // can't use more than 1M, see http://bugs.kde.org/show_bug.cgi?id=203877
     enum { DEFAULT_SEGMENT_SIZE = 1 * 1024 * 1024 };
 #else
-    enum { DEFAULT_SEGMENT_SIZE = 16 * 1024 * 1024 }; // [amm] allow larger object sizes
+    enum { DEFAULT_SEGMENT_SIZE = 8 * 1024 * 1024 };
 #endif
 
   PRIVATE:
