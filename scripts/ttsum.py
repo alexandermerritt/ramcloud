@@ -73,14 +73,18 @@ def scan(f, startingEvent):
 
     foundStart = False
     startTime = 0.0
+    lastTime = -1.0
     for line in f:
-        match = re.match('.*TimeTrace::printInternal.* '
+        match = re.match('.*TimeTrace\\.cc:.*printInternal.* '
                 '([0-9.]+) ns \(\+ *([0-9.]+) ns\): (.*)', line)
         if not match:
             continue
         thisEventTime = float(match.group(1))
         thisEventInterval = float(match.group(2))
         thisEvent = match.group(3)
+        if (thisEventTime < lastTime):
+            print('Time went backwards at the following line:\n%s' % (line))
+        lastTime = thisEventTime
         if (thisEventTime != 0.0) :
             if not thisEvent in eventIntervals:
                 eventIntervals[thisEvent] = []
@@ -100,7 +104,7 @@ def scan(f, startingEvent):
             # If we get here, it means that we have found an event that
             # is not the starting event, and startTime indicates the time of
             # the starting event. First, see how many times this event has
-            # occurred since the last occurrence of the starting of it.
+            # occurred since the last occurrence of the starting event.
             relativeTime = thisEventTime - startTime
             # print('%.1f %.1f %s' % (relativeTime, thisEventInterval, thisEvent))
             if thisEvent in eventCount:
@@ -153,16 +157,17 @@ if not options.startEvent:
         intervals = eventIntervals[event]
         intervals.sort()
         medianTime = intervals[len(intervals)//2]
-        message = '%-*s  %8.1f %8.1f %8.1f %8.1f' % (nameLength,
+        message = '%-*s  %8.1f %8.1f %8.1f %8.1f %7d' % (nameLength,
             event, medianTime, intervals[0], intervals[-1],
-            sum(intervals)/len(intervals))
+            sum(intervals)/len(intervals), len(intervals))
         outputInfo.append([medianTime, message])
 
     # Pass 2: sort in order of median interval length, then print.
     outputInfo.sort(key=lambda item: item[0], reverse=True)
-    print('%-*s    Median      Min      Max  Average' % (nameLength,
+    print('%-*s    Median      Min      Max  Average   Count' % (nameLength,
             "Event"))
-    print('-----------------------------------------------------------')
+    print('%s---------------------------------------------' %
+            ('-' * nameLength))
     for message in outputInfo:
         print(message[1])
 
@@ -197,15 +202,16 @@ if options.startEvent:
             times.sort()
             medianTime = times[len(times)//2]
             intervals.sort()
-            message = '%-*s  %8.1f %8.1f %8.1f %8.1f %8.1f' % (nameLength,
-                eventName, medianTime, intervals[len(intervals)//2],
-                intervals[0], intervals[-1], sum(intervals)/len(intervals))
+            message = '%-*s  %8.1f %8.1f %8.1f %8.1f %8.1f %7d' % (nameLength,
+                eventName, medianTime, times[0], times[-1],
+                sum(times)/len(times), intervals[len(intervals)//2],
+                len(times))
             outputInfo.append([medianTime, message])
 
     outputInfo.sort(key=lambda item: item[0])
-    print('%-*s      Time   Median      Min      Max  Average' % (nameLength,
+    print('%-*s    Median      Min      Max  Average    Delta   Count' % (nameLength,
             "Event"))
-    print('%s----------------------------------------------' %
+    print('%s------------------------------------------------------' %
             ('-' * nameLength))
     for message in outputInfo:
         print(message[1])

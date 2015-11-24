@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2014 Stanford University
+/* Copyright (c) 2009-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -22,6 +22,7 @@
 
 #include "Common.h"
 #include "ClientException.h"
+#include "ClientLeaseAuthority.h"
 #include "CoordinatorServerList.h"
 #include "CoordinatorUpdateManager.h"
 #include "MasterRecoveryManager.h"
@@ -42,37 +43,31 @@ namespace RAMCloud {
 class CoordinatorService : public Service {
   public:
     explicit CoordinatorService(Context* context,
-            uint32_t deadServerTimeout,
-            bool startRecoveryManager = true,
-            uint32_t maxThreads = 1);
+                                uint32_t deadServerTimeout,
+                                bool unitTesting = false,
+                                bool neverKill = false);
     ~CoordinatorService();
     void dispatch(WireFormat::Opcode opcode,
             Rpc* rpc);
     RuntimeOptions *getRuntimeOptionsFromCoordinator();
-    int maxThreads() { return threadLimit; }
 
   PRIVATE:
     // - rpc handlers -
-    void createTable(const WireFormat::CreateTable::Request* reqHdr,
-            WireFormat::CreateTable::Response* respHdr,
-            Rpc* rpc);
-    void dropTable(const WireFormat::DropTable::Request* reqHdr,
-            WireFormat::DropTable::Response* respHdr,
+    void coordSplitAndMigrateIndexlet(
+            const WireFormat::CoordSplitAndMigrateIndexlet::Request* reqHdr,
+            WireFormat::CoordSplitAndMigrateIndexlet::Response* respHdr,
             Rpc* rpc);
     void createIndex(const WireFormat::CreateIndex::Request* reqHdr,
             WireFormat::CreateIndex::Response* respHdr,
             Rpc* rpc);
+    void createTable(const WireFormat::CreateTable::Request* reqHdr,
+            WireFormat::CreateTable::Response* respHdr,
+            Rpc* rpc);
     void dropIndex(const WireFormat::DropIndex::Request* reqHdr,
             WireFormat::DropIndex::Response* respHdr,
             Rpc* rpc);
-    void splitTablet(const WireFormat::SplitTablet::Request* reqHdr,
-            WireFormat::SplitTablet::Response* respHdr,
-            Rpc* rpc);
-    void getRuntimeOption(const WireFormat::GetRuntimeOption::Request* reqHdr,
-            WireFormat::GetRuntimeOption::Response* respHdr,
-            Rpc* rpc);
-    void getTableId(const WireFormat::GetTableId::Request* reqHdr,
-            WireFormat::GetTableId::Response* respHdr,
+    void dropTable(const WireFormat::DropTable::Request* reqHdr,
+            WireFormat::DropTable::Response* respHdr,
             Rpc* rpc);
     void enlistServer(const WireFormat::EnlistServer::Request* reqHdr,
             WireFormat::EnlistServer::Response* respHdr,
@@ -80,8 +75,14 @@ class CoordinatorService : public Service {
     void getBackupConfig(const WireFormat::GetBackupConfig::Request* reqHdr,
             WireFormat::GetBackupConfig::Response* respHdr,
             Rpc* rpc);
+    void getLeaseInfo(const WireFormat::GetLeaseInfo::Request* reqHdr,
+                      WireFormat::GetLeaseInfo::Response* respHdr,
+                      Rpc* rpc);
     void getMasterConfig(const WireFormat::GetMasterConfig::Request* reqHdr,
             WireFormat::GetMasterConfig::Response* respHdr,
+            Rpc* rpc);
+    void getRuntimeOption(const WireFormat::GetRuntimeOption::Request* reqHdr,
+            WireFormat::GetRuntimeOption::Response* respHdr,
             Rpc* rpc);
     void getServerList(const WireFormat::GetServerList::Request* reqHdr,
             WireFormat::GetServerList::Response* respHdr,
@@ -89,33 +90,39 @@ class CoordinatorService : public Service {
     void getTableConfig(const WireFormat::GetTableConfig::Request* reqHdr,
             WireFormat::GetTableConfig::Response* respHdr,
             Rpc* rpc);
+    void getTableId(const WireFormat::GetTableId::Request* reqHdr,
+            WireFormat::GetTableId::Response* respHdr,
+            Rpc* rpc);
     void hintServerCrashed(const WireFormat::HintServerCrashed::Request* reqHdr,
             WireFormat::HintServerCrashed::Response* respHdr,
-            Rpc* rpc);
-    void recoveryMasterFinished(
-            const WireFormat::RecoveryMasterFinished::Request* reqHdr,
-            WireFormat::RecoveryMasterFinished::Response* respHdr,
-            Rpc* rpc);
-    void quiesce(const WireFormat::BackupQuiesce::Request* reqHdr,
-            WireFormat::BackupQuiesce::Response* respHdr,
             Rpc* rpc);
     void reassignTabletOwnership(
             const WireFormat::ReassignTabletOwnership::Request* reqHdr,
             WireFormat::ReassignTabletOwnership::Response* respHdr,
             Rpc* rpc);
-    void setRuntimeOption(const WireFormat::SetRuntimeOption::Request* reqHdr,
-            WireFormat::SetRuntimeOption::Response* respHdr,
+    void recoveryMasterFinished(
+            const WireFormat::RecoveryMasterFinished::Request* reqHdr,
+            WireFormat::RecoveryMasterFinished::Response* respHdr,
+            Rpc* rpc);
+    void renewLease(const WireFormat::RenewLease::Request* reqHdr,
+                    WireFormat::RenewLease::Response* respHdr,
+                    Rpc* rpc);
+    void serverControlAll(const WireFormat::ServerControlAll::Request* reqHdr,
+            WireFormat::ServerControlAll::Response* respHdr,
             Rpc* rpc);
     void setMasterRecoveryInfo(
             const WireFormat::SetMasterRecoveryInfo::Request* reqHdr,
             WireFormat::SetMasterRecoveryInfo::Response* respHdr,
             Rpc* rpc);
+    void setRuntimeOption(const WireFormat::SetRuntimeOption::Request* reqHdr,
+            WireFormat::SetRuntimeOption::Response* respHdr,
+            Rpc* rpc);
+    void splitTablet(const WireFormat::SplitTablet::Request* reqHdr,
+            WireFormat::SplitTablet::Response* respHdr,
+            Rpc* rpc);
     void verifyMembership(
             const WireFormat::VerifyMembership::Request* reqHdr,
             WireFormat::VerifyMembership::Response* respHdr,
-            Rpc* rpc);
-    void serverControlAll(const WireFormat::ServerControlAll::Request* reqHdr,
-            WireFormat::ServerControlAll::Response* respHdr,
             Rpc* rpc);
 
     // - helper methods -
@@ -134,7 +141,7 @@ class CoordinatorService : public Service {
         {}
     };
 
-    static void init(CoordinatorService* service, bool startRecoveryManager);
+    static void init(CoordinatorService* service, bool unitTesting);
     void checkServerControlRpcs(std::list<ServerControlRpcContainer>* rpcs,
             WireFormat::ServerControlAll::Response* respHdr,
             Rpc* rpc);
@@ -172,6 +179,12 @@ class CoordinatorService : public Service {
      */
     TableManager tableManager;
 
+    /**
+     * Manages all client lease and serves requests for new leases and checks
+     * for lease validity.
+     */
+    ClientLeaseAuthority leaseAuthority;
+
   PRIVATE:
     /**
      * Contains coordinator configuration options which can be modified while
@@ -186,16 +199,15 @@ class CoordinatorService : public Service {
     MasterRecoveryManager recoveryManager;
 
     /**
-     * Maximum number of threads that are allowed to execute RPC handlers in
-     * service at one time.
-     */
-    uint32_t threadLimit;
-
-    /**
      * Used for testing only. If true, the HINT_SERVER_CRASHED handler will
      * assume that the server has failed (rather than checking for itself).
      */
     bool forceServerDownForTesting;
+
+    /**
+     * Used for debugging. If true, this coordinator will never kill a master.
+     */
+    bool neverKill;
 
     /**
      * True means that the init method has completed its initialization.

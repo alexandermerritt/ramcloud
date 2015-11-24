@@ -1,4 +1,6 @@
 COORDINATOR_SRCFILES := \
+			src/ClientLeaseAuthority.cc \
+			src/CoordinatorClusterClock.cc \
 			src/CoordinatorServerList.cc \
 			src/CoordinatorService.cc \
 			src/CoordinatorUpdateManager.cc \
@@ -8,6 +10,7 @@ COORDINATOR_SRCFILES := \
 			src/TableManager.cc \
 			src/Recovery.cc \
 			src/RuntimeOptions.cc \
+			src/CoordinatorClusterClock.pb.cc \
 			src/CoordinatorUpdateInfo.pb.cc \
 			src/ServerListEntry.pb.cc \
 			src/Table.pb.cc \

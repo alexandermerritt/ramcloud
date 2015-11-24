@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any purpose
  * with or without fee is hereby granted, provided that the above copyright
@@ -51,7 +51,7 @@ class UdpDriverTest : public ::testing::Test {
         UdpDriver::sys = sys;
         exceptionMessage = "no exception";
         serverLocator = new ServiceLocator("udp: host=localhost, port=8100");
-        serverAddress = new IpAddress(*serverLocator);
+        serverAddress = new IpAddress(serverLocator);
         server = new UdpDriver(&context, serverLocator);
         client = new UdpDriver(&context);
         logEnabler = new TestLog::Enable();
@@ -227,7 +227,6 @@ TEST_F(UdpDriverTest, sendPacket_errorInSend) {
     client->sendPacket(serverAddress, "header:", 7, &iterator);
     EXPECT_EQ("sendPacket: UdpDriver error sending to socket: "
             "Operation not permitted", TestLog::get());
-    EXPECT_EQ(-1, client->socketFd);
 }
 
 TEST_F(UdpDriverTest, ReadHandler_errorInRecv) {
@@ -237,7 +236,6 @@ TEST_F(UdpDriverTest, ReadHandler_errorInRecv) {
             Dispatch::FileEvent::READABLE);
     EXPECT_EQ("handleFileEvent: UdpDriver error receiving from socket: "
             "Operation not permitted", TestLog::get());
-    EXPECT_EQ(-1, server->socketFd);
 }
 
 TEST_F(UdpDriverTest, ReadHandler_noPacketAvailable) {
@@ -250,9 +248,9 @@ TEST_F(UdpDriverTest, ReadHandler_multiplePackets) {
     sendMessage(client, serverAddress, "header:", "first");
     sendMessage(client, serverAddress, "header:", "second");
     sendMessage(client, serverAddress, "header:", "third");
-    EXPECT_STREQ("header:first", receivePacket(serverTransport));
-    EXPECT_STREQ("header:second", receivePacket(serverTransport));
-    EXPECT_STREQ("header:third", receivePacket(serverTransport));
+    EXPECT_STREQ("header:first, header:second, header:third",
+            receivePacket(serverTransport));
+    EXPECT_STREQ("no packet arrived", receivePacket(serverTransport));
 }
 
 }  // namespace RAMCloud

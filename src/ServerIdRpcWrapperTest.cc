@@ -153,7 +153,7 @@ TEST_F(ServerIdRpcWrapperTest, handleTransportError_callServerCrashed) {
     context.serverList = &serverList;
     MockExternalStorage storage(false);
     context.externalStorage = &storage;
-    CoordinatorService coordinator(&context, 1000, false);
+    CoordinatorService coordinator(&context, 1000, true);
     coordinator.recoveryManager.doNotStartRecoveries = true;
 
     // Don't let the server list updater run; can cause timing-dependent
@@ -167,11 +167,12 @@ TEST_F(ServerIdRpcWrapperTest, handleTransportError_callServerCrashed) {
     wrapper.state = RpcWrapper::RpcState::FAILED;
     wrapper.transportErrors = 2;
     TestLog::reset();
-    TestLog::Enable _("startMasterRecovery");
+    TestLog::Enable _("handleTransportError");
     EXPECT_TRUE(wrapper.isReady());
     EXPECT_STREQ("FAILED", wrapper.stateString());
     EXPECT_TRUE(wrapper.serverCrashed);
-    EXPECT_EQ("startMasterRecovery: Recovery requested for 1.0",
+    EXPECT_EQ("handleTransportError: server server 1.0 at mock: "
+            "considered crashed: no response to unknown(100) RPC",
             TestLog::get());
 }
 

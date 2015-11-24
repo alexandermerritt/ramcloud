@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2014 Stanford University
+/* Copyright (c) 2011-2015 Stanford University
  * Copyright (c) 2011 Facebook
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -43,6 +43,7 @@
 #include "CycleCounter.h"
 #include "Dispatch.h"
 #include "Fence.h"
+#include "LockTable.h"
 #include "Memory.h"
 #include "MurmurHash3.h"
 #include "Object.h"
@@ -111,12 +112,13 @@ double atomicIntInc()
 {
     int count = 1000000;
     Atomic<int> value(11);
+    int prevValue = 1;
     uint64_t start = Cycles::rdtsc();
     for (int i = 0; i < count; i++) {
-         value.inc();
+         prevValue = value.inc(prevValue);
     }
     uint64_t stop = Cycles::rdtsc();
-    // printf("Final value: %d\n", value.load());
+    // printf("Final value: %d\n", prevValue);
     return Cycles::toSeconds(stop - start)/count;
 }
 
@@ -176,6 +178,98 @@ double bMutexNoBlock()
     }
     uint64_t stop = Cycles::rdtsc();
     return Cycles::toSeconds(stop - start)/count;
+}
+
+template<int keyLength>
+static double bufferAppendCommon()
+{
+    Buffer b;
+    char src[keyLength];
+    int count = 1000000;
+    uint64_t totalTime = 0;
+    for (int i = 0; i < count; i++) {
+        uint64_t start = Cycles::rdtsc();
+        b.appendCopy(src, keyLength);
+        totalTime += Cycles::rdtsc() - start;
+        b.reset();
+    }
+    return Cycles::toSeconds(totalTime)/count;
+}
+
+template<int keyLength>
+static double bufferAppendExternalCommon()
+{
+    Buffer b;
+    char src[keyLength];
+    int count = 1000000;
+    uint64_t totalTime = 0;
+    for (int i = 0; i < count; i++) {
+        uint64_t start = Cycles::rdtsc();
+        b.appendExternal(src, keyLength);
+        totalTime += Cycles::rdtsc() - start;
+        b.reset();
+    }
+    return Cycles::toSeconds(totalTime)/count;
+}
+
+// Measure the cost of appendCopy'ing 1 bytes to a Buffer
+double bufferAppendCopy1()
+{
+    return bufferAppendCommon<1>();
+}
+
+// Measure the cost of appendCopy'ing 50 bytes to a Buffer
+double bufferAppendCopy50()
+{
+    return bufferAppendCommon<50>();
+}
+
+// Measure the cost of appendCopy'ing 100 bytes to a Buffer
+double bufferAppendCopy100()
+{
+    return bufferAppendCommon<100>();
+}
+
+// Measure the cost of appendCopy'ing 250 bytes to a Buffer
+double bufferAppendCopy250()
+{
+    return bufferAppendCommon<250>();
+}
+
+// Measure the cost of appendCopy'ing 500 bytes to a Buffer
+double bufferAppendCopy500()
+{
+    return bufferAppendCommon<500>();
+}
+
+// Measure the cost of appendExternal'ing 1 bytes to a Buffer
+double bufferAppendExternal1()
+{
+    return bufferAppendExternalCommon<1>();
+}
+
+// Measure the cost of appendExternal'ing 50 bytes to a Buffer
+double bufferAppendExternal50()
+{
+    return bufferAppendExternalCommon<50>();
+}
+
+// Measure the cost of appendExternal'ing 100 bytes to a Buffer
+double bufferAppendExternal100()
+{
+    return bufferAppendExternalCommon<100>();
+}
+
+// Measure the cost of appendExternal'ing 250 bytes to a Buffer
+double bufferAppendExternal250()
+{
+    return bufferAppendExternalCommon<250>();
+}
+
+// Measure the cost of appendExternal'ing 500 bytes to a Buffer
+double bufferAppendExternal500()
+{
+    return bufferAppendExternalCommon<500>();
 }
 
 // Measure the cost of allocating and deallocating a buffer, plus
@@ -240,6 +334,16 @@ double bufferCopy()
     return Cycles::toSeconds(stop - start)/count;
 }
 
+double bufferConstruct() {
+    int count = 1000000;
+    uint64_t start = Cycles::rdtsc();
+    for (int i = 0; i < count; i++) {
+        Buffer b;   // Compiler doesn't seem to optimize this out.
+    }
+    uint64_t stop = Cycles::rdtsc();
+    return Cycles::toSeconds(stop - start)/count;
+}
+
 // Measure the cost of allocating new space by extending the
 // last chunk.
 double bufferExtendChunk()
@@ -265,6 +369,17 @@ double bufferExtendChunk()
     }
     return Cycles::toSeconds(total)/(count*10);
 }
+// Measure the cost of reseting an empty Buffer
+double bufferReset() {
+    Buffer b;
+    int count = 1000000;
+    uint64_t start = Cycles::rdtsc();
+    for (int i = 0; i < count; i++) {
+        b.reset();
+    }
+    uint64_t totalTime = Cycles::rdtsc() - start;
+    return Cycles::toSeconds(totalTime)/count;
+}
 
 // Measure the cost of retrieving an object from the beginning of a buffer.
 double bufferGetStart()
@@ -282,28 +397,80 @@ double bufferGetStart()
     return Cycles::toSeconds(stop - start)/count;
 }
 
-// Measure the cost of creating an iterator and iterating over 10
-// chunks in a buffer.
-double bufferIterator()
+// Measure the cost of creating an iterator and iterating over/accessing
+// 1 byte in every appendCopy()ed, 100-byte chunk.
+template<uint32_t chunks>
+double bufferCopyIterator()
 {
     Buffer b;
-    const char* p = "abcdefghijklmnopqrstuvwxyz";
-    for (int i = 0; i < 5; i++) {
-        b.appendExternal(p+i, 5);
+    char data[4096 * chunks];
+    for (uint32_t i = 0; i < chunks; i++) {
+        b.appendCopy(data + 4096 * i, 100);
     }
-    int count = 100000;
+
     int sum = 0;
+    int count = 1000000;
     uint64_t start = Cycles::rdtsc();
     for (int i = 0; i < count; i++) {
         Buffer::Iterator it(&b);
         while (!it.isDone()) {
-            sum += (static_cast<const char*>(it.getData()))[it.getLength()-1];
+            for (uint32_t j = 0; j < it.getLength(); j += 100)
+                sum += (static_cast<const char*>(it.getData()))[j];
             it.next();
         }
     }
     uint64_t stop = Cycles::rdtsc();
     discard(&sum);
+
     return Cycles::toSeconds(stop - start)/count;
+}
+
+// Measure the cost of creating an iterator and iterating over/accessing
+// 1 byte in every appendExternal()ed, 100-byte chunk.
+template<uint32_t chunks>
+double bufferExternalIterator()
+{
+    Buffer b;
+    char data[4096 * chunks];
+    for (uint32_t i = 0; i < chunks; i++) {
+        b.appendExternal(data + 4096 * i, 100);
+    }
+
+    int sum = 0;
+    int count = 1000000;
+    uint64_t start = Cycles::rdtsc();
+    for (int i = 0; i < count; i++) {
+        Buffer::Iterator it(&b);
+        while (!it.isDone()) {
+            for (uint32_t j = 0; j < it.getLength(); j += 100)
+                sum += (static_cast<const char*>(it.getData()))[j];
+            it.next();
+        }
+    }
+    uint64_t stop = Cycles::rdtsc();
+    discard(&sum);
+
+    return Cycles::toSeconds(stop - start)/count;
+}
+
+double bufferCopyIterator2()
+{
+    return bufferCopyIterator<2>();
+}
+
+double bufferCopyIterator5()
+{
+    return bufferCopyIterator<5>();
+}
+
+double bufferExternalIterator2()
+{
+    return bufferExternalIterator<2>();
+}
+
+double bufferExternalIterator5()
+{
+    return bufferExternalIterator<5>();
 }
 
 // Implements the condPingPong test.
@@ -495,6 +662,20 @@ double getThreadId()
     return Cycles::toSeconds(stop - start)/count;
 }
 
+// Measure the cost of getting the kernel thread id using a syscall.
+double getThreadIdSyscall()
+{
+    int count = 1000000;
+    int64_t result = 0;
+    uint64_t start = Cycles::rdtsc();
+    for (int i = 0; i < count; i++) {
+        result += syscall(SYS_gettid);
+    }
+    uint64_t stop = Cycles::rdtsc();
+    // printf("Result: %d\n", downCast<int>(result));
+    return Cycles::toSeconds(stop - start)/count;
+}
+
 // Measure hash table lookup performance. Prefetching can
 // be enabled to measure its effect. This test is a lot
 // slower than the others (takes several seconds) due to the
@@ -618,32 +799,128 @@ double lockNonDispThrd()
     return Cycles::toSeconds(stop - start)/count;
 }
 
-// Measure the cost of copying a given number of bytes with memcpy.
-double memcpyShared(size_t size)
+// Measure the time to create and delete an entry in a small
+// map.
+double mapCreate()
 {
-    int count = 1000000;
-    char src[size], dst[size];
+    // Generate an array of random keys that will be used to lookup
+    // entries in the map.
+    int numKeys = 20;
+    uint64_t keys[numKeys];
+    for (int i = 0; i < numKeys; i++) {
+        keys[i] = generateRandom();
+    }
+
+    int count = 10000;
     uint64_t start = Cycles::rdtsc();
-    for (int i = 0; i < count; i++) {
-        memcpy(dst, src, size);
+    for (int i = 0; i < count; i += 5) {
+        std::map<uint64_t, uint64_t> map;
+        for (int j = 0; j < numKeys; j++) {
+            map[keys[j]] = 1000+j;
+        }
+        for (int j = 0; j < numKeys; j++) {
+            map.erase(keys[j]);
+        }
     }
     uint64_t stop = Cycles::rdtsc();
-    return Cycles::toSeconds(stop - start)/count;
+    return Cycles::toSeconds(stop - start)/(count * numKeys);
 }
 
-double memcpy100()
+// Measure the time to lookup a random element in a small map.
+double mapLookup()
 {
-    return memcpyShared(100);
+    std::map<uint64_t, uint64_t> map;
+
+    // Generate an array of random keys that will be used to lookup
+    // entries in the map.
+    int numKeys = 20;
+    uint64_t keys[numKeys];
+    for (int i = 0; i < numKeys; i++) {
+        keys[i] = generateRandom();
+        map[keys[i]] = 12345;
+    }
+
+    int count = 100000;
+    uint64_t sum = 0;
+    uint64_t start = Cycles::rdtsc();
+    for (int i = 0; i < count; i++) {
+        for (int j = 0; j < numKeys; j++) {
+            sum += map[keys[j]];
+        }
+    }
+    uint64_t stop = Cycles::rdtsc();
+    return Cycles::toSeconds(stop - start)/(count*numKeys);
 }
 
-double memcpy1000()
+// Measure the cost of copying a given number of bytes with memcpy.
+double memcpyShared(int cpySize, bool coldSrc = false, bool coldDst = false)
 {
-    return memcpyShared(1000);
+    int count = 1000000;
+    uint32_t src[count], dst[count];
+    int bufSize = 1000000000; // 1GB buffer
+    char *buf = static_cast<char*>(malloc(bufSize));
+
+    uint32_t bound = (bufSize - cpySize);
+    for (int i = 0; i < count; i++) {
+        src[i] = (coldSrc) ? downCast<uint32_t>(generateRandom() % bound) : 0;
+        dst[i] = (coldDst) ? downCast<uint32_t>(generateRandom() % bound) : 0;
+    }
+
+    uint64_t start = Cycles::rdtsc();
+    for (int i = 0; i < count; i++) {
+        memcpy((buf + dst[i]),
+                (buf + src[i]),
+                cpySize);
+    }
+    uint64_t stop = Cycles::rdtsc();
+
+    free(buf);
+    return Cycles::toSeconds(stop - start)/(count);
 }
 
-double memcpy10000()
+double memcpyCached100()
 {
-    return memcpyShared(10000);
+    return memcpyShared(100, false, false);
+}
+
+double memcpyCached1000()
+{
+    return memcpyShared(1000, false, false);
+}
+
+double memcpyCached10000()
+{
+    return memcpyShared(10000, false, false);
+}
+
+double memcpyCachedDst100()
+{
+    return memcpyShared(100, true, false);
+}
+
+double memcpyCachedDst1000()
+{
+    return memcpyShared(1000, true, false);
+}
+
+double memcpyCachedDst10000()
+{
+    return memcpyShared(10000, true, false);
+}
+
+double memcpyCold100()
+{
+    return memcpyShared(100, true, true);
+}
+
+double memcpyCold1000()
+{
+    return memcpyShared(1000, true, true);
+}
+
+double memcpyCold10000()
+{
+    return memcpyShared(10000, true, true);
 }
 
 // Benchmark MurmurHash3 hashing performance on cached data.
@@ -1066,6 +1343,56 @@ double timeTrace()
     return Cycles::toSeconds(stop - start)/count;
 }
 
+// Measure the time to create and delete an entry in a small
+// unordered_map.
+double unorderedMapCreate()
+{
+    std::unordered_map<uint64_t, uint64_t> map;
+
+    int count = 100000;
+    uint64_t start = Cycles::rdtsc();
+    for (int i = 0; i < count; i += 5) {
+        map[i] = 100;
+        map[i+1] = 200;
+        map[i+2] = 300;
+        map[i+3] = 400;
+        map[i+4] = 500;
+        map.erase(i);
+        map.erase(i+1);
+        map.erase(i+2);
+        map.erase(i+3);
+        map.erase(i+4);
+    }
+    uint64_t stop = Cycles::rdtsc();
+    return Cycles::toSeconds(stop - start)/count;
+}
+
+// Measure the time to lookup a random element in a small unordered_map.
+double unorderedMapLookup()
+{
+    std::unordered_map<uint64_t, uint64_t> map;
+
+    // Generate an array of random keys that will be used to lookup
+    // entries in the map.
+    int numKeys = 10;
+    uint64_t keys[numKeys];
+    for (int i = 0; i < numKeys; i++) {
+        keys[i] = generateRandom();
+        map[keys[i]] = 12345;
+    }
+
+    int count = 100000;
+    uint64_t sum = 0;
+    uint64_t start = Cycles::rdtsc();
+    for (int i = 0; i < count; i++) {
+        for (int j = 0; j < numKeys; j++) {
+            sum += map[keys[j]];
+        }
+    }
+    uint64_t stop = Cycles::rdtsc();
+    return Cycles::toSeconds(stop - start)/(count*numKeys);
+}
+
 // Measure the cost of pushing a new element on a std::vector, copying
 // from the end to an internal element, and popping the end element.
 double vectorPushPop()
@@ -1117,6 +1444,26 @@ TestInfo tests[] = {
      "Atomic<int>::exchange"},
     {"bMutexNoBlock", bMutexNoBlock,
      "std::mutex lock/unlock (no blocking)"},
+    {"bufferAppendCopy1", bufferAppendCopy1,
+     "appendCopy 1 byte to a buffer"},
+    {"bufferAppendCopy50", bufferAppendCopy50,
+     "appendCopy 50 bytes to a buffer"},
+    {"bufferAppendCopy100", bufferAppendCopy100,
+     "appendCopy 100 bytes to a buffer"},
+    {"bufferAppendCopy250", bufferAppendCopy250,
+     "appendCopy 250 bytes to a buffer"},
+    {"bufferAppendCopy500", bufferAppendCopy500,
+     "appendCopy 500 bytes to a buffer"},
+    {"bufferAppendExternal1", bufferAppendExternal1,
+     "appendExternal 1 byte to a buffer"},
+    {"bufferAppendExternal50", bufferAppendExternal50,
+     "appendExternal 50 bytes to a buffer"},
+    {"bufferAppendExternal100", bufferAppendExternal100,
+     "appendExternal 100 bytes to a buffer"},
+    {"bufferAppendExternal250", bufferAppendExternal250,
+     "appendExternal 250 bytes to a buffer"},
+    {"bufferAppendExternal500", bufferAppendExternal500,
+     "appendExternal 500 bytes to a buffer"},
     {"bufferBasic", bufferBasic,
      "buffer create, add one chunk, delete"},
     {"bufferBasicAlloc", bufferBasicAlloc,
@@ -1129,8 +1476,18 @@ TestInfo tests[] = {
      "buffer add onto existing chunk"},
     {"bufferGetStart", bufferGetStart,
      "Buffer::getStart"},
-    {"bufferIterator", bufferIterator,
-     "iterate over buffer with 5 chunks"},
+    {"bufferConstruct", bufferConstruct,
+     "buffer stack allocation"},
+    {"bufferReset", bufferReset,
+     "Buffer::reset"},
+    {"bufferCopyIterator2", bufferCopyIterator2,
+     "buffer iterate over 2 copied chunks, accessing 1 byte each"},
+    {"bufferCopyIterator5", bufferCopyIterator5,
+     "buffer iterate over 5 copied chunks, accessing 1 byte each"},
+    {"bufferExternalIterator2", bufferExternalIterator2,
+     "buffer iterate over 2 external chunks, accessing 1 byte each"},
+    {"bufferExternalIterator5", bufferExternalIterator5,
+     "buffer iterate over 5 external chunks, accessing 1 byte each"},
     {"condPingPong", condPingPong,
      "std::condition_variable round-trip"},
     {"cppAtomicExchg", cppAtomicExchange,
@@ -1153,6 +1510,8 @@ TestInfo tests[] = {
      "Generate a random 100-byte value"},
     {"getThreadId", getThreadId,
      "Retrieve thread id via ThreadId::get"},
+    {"getThreadIdSyscall", getThreadIdSyscall,
+     "Retrieve kernel thread id using syscall"},
     {"hashTableLookup", hashTableLookup,
      "Key lookup in a 1GB HashTable"},
     {"hashTableLookupPf", hashTableLookup<20>,
@@ -1163,12 +1522,28 @@ TestInfo tests[] = {
      "Acquire/release Dispatch::Lock (in dispatch thread)"},
     {"lockNonDispThrd", lockNonDispThrd,
      "Acquire/release Dispatch::Lock (non-dispatch thread)"},
-    {"memcpy100", memcpy100,
-     "Copy 100 bytes with memcpy"},
-    {"memcpy1000", memcpy1000,
-     "Copy 1000 bytes with memcpy"},
-    {"memcpy10000", memcpy10000,
-     "Copy 10000 bytes with memcpy"},
+    {"mapCreate", mapCreate,
+     "Create+delete entry in std::map"},
+    {"mapLookup", mapLookup,
+     "Lookup in std::map<uint64_t, uint64_t>"},
+    {"memcpyCached100", memcpyCached100,
+     "memcpy 100 bytes with hot/fixed dst and src"},
+    {"memcpyCached1000", memcpyCached1000,
+     "memcpy 1000 bytes with hot/fixed dst and src"},
+    {"memcpyCached10000", memcpyCached10000,
+     "memcpy 10000 bytes with hot/fixed dst and src"},
+    {"memcpyCachedDst100", memcpyCachedDst100,
+     "memcpy 100 bytes with hot/fixed dst and cold src"},
+    {"memcpyCachedDst1000", memcpyCachedDst1000,
+     "memcpy 1000 bytes with hot/fixed dst and cold src"},
+    {"memcpyCachedDst10000", memcpyCachedDst10000,
+     "memcpy 10000 bytes with hot/fixed dst and cold src"},
+    {"memcpyCold100", memcpyCold100,
+     "memcpy 100 bytes with cold dst and src"},
+    {"memcpyCold1000", memcpyCold1000,
+     "memcpy 1000 bytes with cold dst and src"},
+    {"memcpyCold10000", memcpyCold10000,
+     "memcpy 10000 bytes with cold dst and src"},
     {"murmur3", murmur3<1>,
      "128-bit MurmurHash3 (64-bit optimised) on 1 byte of data"},
     {"murmur3", murmur3<256>,
@@ -1211,6 +1586,10 @@ TestInfo tests[] = {
      "Throw an Exception using ClientException::throwException"},
     {"timeTrace", timeTrace,
      "Record an event using TimeTrace"},
+    {"unorderedMapCreate", unorderedMapCreate,
+     "Create+delete entry in unordered_map"},
+    {"unorderedMapLookup", unorderedMapLookup,
+     "Lookup in std::unordered_map<uint64_t, uint64_t>"},
     {"vectorPushPop", vectorPushPop,
      "Push and pop a std::vector"},
 };
@@ -1224,7 +1603,7 @@ TestInfo tests[] = {
 void runTest(TestInfo& info)
 {
     double secs = info.func();
-    int width = printf("%-18s ", info.name);
+    int width = printf("%-23s ", info.name);
     if (secs < 1.0e-06) {
         width += printf("%8.2fns", 1e09*secs);
     } else if (secs < 1.0e-03) {

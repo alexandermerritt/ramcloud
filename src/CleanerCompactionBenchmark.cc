@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -31,20 +31,30 @@ class CleanerCompactionBenchmark {
 
   public:
     Context context;
+    ClusterClock clusterClock;
+    ClientLeaseValidator clientLeaseValidator;
     ServerConfig config;
     ServerList serverList;
     TabletManager tabletManager;
     MasterTableMetadata masterTableMetadata;
+    UnackedRpcResults unackedRpcResults;
+    PreparedOps preparedOps;
+    TxRecoveryManager txRecoveryManager;
     ServerId serverId;
     ObjectManager* objectManager;
 
     CleanerCompactionBenchmark(string logSize, string hashTableSize,
         int numSegments)
         : context()
+        , clusterClock()
+        , clientLeaseValidator(&context, &clusterClock)
         , config(ServerConfig::forTesting())
         , serverList(&context)
         , tabletManager()
         , masterTableMetadata()
+        , unackedRpcResults(&context, NULL, &clientLeaseValidator)
+        , preparedOps(&context)
+        , txRecoveryManager(&context)
         , serverId(1, 1)
         , objectManager(NULL)
     {
@@ -61,7 +71,11 @@ class CleanerCompactionBenchmark {
                                           &serverId,
                                           &config,
                                           &tabletManager,
-                                          &masterTableMetadata);
+                                          &masterTableMetadata,
+                                          &unackedRpcResults,
+                                          &preparedOps,
+                                          &txRecoveryManager);
+        unackedRpcResults.resetFreer(objectManager);
     }
 
     ~CleanerCompactionBenchmark()

@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2014 Stanford University
+/* Copyright (c) 2009-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -286,7 +286,7 @@ BackupMasterRecovery::getRecoverySegment(uint64_t recoveryId,
                                          uint64_t segmentId,
                                          int partitionId,
                                          Buffer* buffer,
-                                         Segment::Certificate* certificate)
+                                         SegmentCertificate* certificate)
 {
     if (this->recoveryId != recoveryId) {
         LOG(ERROR, "Requested recovery segment from recovery %lu, but current "
@@ -295,7 +295,7 @@ BackupMasterRecovery::getRecoverySegment(uint64_t recoveryId,
     }
     auto replicaIt = segmentIdToReplica.find(segmentId);
     if (replicaIt == segmentIdToReplica.end()) {
-        LOG(WARNING, "Asked for a recovery segments for segment <%s,%lu> "
+        LOG(WARNING, "Asked for a recovery segment for segment <%s,%lu> "
             "which isn't part of this recovery",
            crashedMasterId.toString().c_str(), segmentId);
         throw BackupBadSegmentIdException(HERE);
@@ -473,6 +473,8 @@ BackupMasterRecovery::populateStartResponse(Buffer* responseBuffer,
     if (response->tableStatsBytes > 0) {
         responseBuffer->appendCopy(tableStatsDigest.getRange(0,
                 response->tableStatsBytes), response->tableStatsBytes);
+        LOG(DEBUG, "Sent %u bytes of table statistics to coordinator",
+            response->tableStatsBytes);
     }
 }
 

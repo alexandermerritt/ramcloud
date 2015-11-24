@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any purpose
  * with or without fee is hereby granted, provided that the above copyright
@@ -88,12 +88,13 @@
 #include "Transport.h"
 #include "InfRcTransport.h"
 #include "IpAddress.h"
-#include "ServiceLocator.h"
-#include "ServiceManager.h"
-#include "ShortMacros.h"
 #include "PerfCounter.h"
+#include "PerfStats.h"
+#include "ServiceLocator.h"
+#include "ShortMacros.h"
 #include "TimeTrace.h"
 #include "Util.h"
+#include "WorkerManager.h"
 
 #define check_error_null(x, s)                              \
     do {                                                    \
@@ -136,11 +137,13 @@ InfRcTransport::InfRcTransport(Context* context,
     , lid(0)
     , serverSetupSocket(-1)
     , clientSetupSocket(-1)
+    , clientPort(0)
     , serverPortMap()
     , clientSendQueue()
     , numUsedClientSrqBuffers(MAX_SHARED_RX_QUEUE_DEPTH)
     , numFreeServerSrqBuffers(0)
     , outstandingRpcs()
+    , pendingOutputBytes(0)
     , clientRpcsActiveTime()
     , locatorString()
     , poller(this)
@@ -148,7 +151,6 @@ InfRcTransport::InfRcTransport(Context* context,
     , logMemoryBase(0)
     , logMemoryBytes(0)
     , logMemoryRegion(0)
-    , transmitCycleCounter()
     , serverRpcPool()
     , clientRpcPool()
     , deadQueuePairs()
@@ -173,13 +175,27 @@ InfRcTransport::InfRcTransport(Context* context,
     // Step 1:
     //  Set up the udp sockets we use for out-of-band infiniband handshaking.
 
-    // For clients, the kernel will automatically assign a dynamic port on
-    // first use.
+    // First, a UDP socket we can use to establish connections to other
+    // servers.
     clientSetupSocket = socket(PF_INET, SOCK_DGRAM, 0);
     if (clientSetupSocket == -1) {
         LOG(ERROR, "failed to create client socket: %s", strerror(errno));
         throw TransportException(HERE, format(
                 "failed to create client socket: %s", strerror(errno)));
+    }
+    struct sockaddr_in socketAddress;
+    socketAddress.sin_family = AF_INET;
+    socketAddress.sin_addr.s_addr = htonl(INADDR_ANY);
+    socketAddress.sin_port = 0;
+    if (bind(clientSetupSocket,
+            reinterpret_cast<struct sockaddr*>(&socketAddress),
+            sizeof(socketAddress)) == -1) {
+        close(clientSetupSocket);
+        LOG(WARNING, "couldn't bind port for clientSetupSocket: %s",
+                strerror(errno));
+        throw TransportException(HERE,
+                "InfRcTransport couldn't bind port for clientSetupSocket",
+                errno);
     }
     try {
         setNonBlocking(clientSetupSocket);
@@ -187,10 +203,22 @@ InfRcTransport::InfRcTransport(Context* context,
         close(clientSetupSocket);
         throw;
     }
+    socklen_t socketAddressLength = sizeof(socketAddress);
+    if (getsockname(clientSetupSocket,
+            reinterpret_cast<struct sockaddr*>(&socketAddress),
+            &socketAddressLength) != 0) {
+        close(clientSetupSocket);
+        LOG(ERROR, "couldn't get port for clientSetupSocket: %s",
+                strerror(errno));
+        throw TransportException(HERE,
+                "InfRcTransport couldn't set up clientSetupSocket",
+                errno);
+    }
+    clientPort = NTOHS(socketAddress.sin_port);
 
     // If this is a server, create a server setup socket and bind it.
     if (sl != NULL) {
-        IpAddress address(*sl);
+        IpAddress address(sl);
 
         serverSetupSocket = socket(PF_INET, SOCK_DGRAM, 0);
         if (serverSetupSocket == -1) {
@@ -203,9 +231,11 @@ InfRcTransport::InfRcTransport(Context* context,
           sizeof(address.address))) {
             close(serverSetupSocket);
             serverSetupSocket = -1;
-            LOG(ERROR, "failed to bind socket: %s", strerror(errno));
-            throw TransportException(HERE, format("failed to bind socket: %s",
-                    strerror(errno)));
+            LOG(ERROR, "failed to bind socket for port %s: %s",
+                    sl->getOption("port").c_str(), strerror(errno));
+            throw TransportException(HERE, format(
+                    "failed to bind socket for port %s: %s",
+                    sl->getOption("port").c_str(), strerror(errno)));
         }
 
         try {
@@ -328,14 +358,17 @@ InfRcTransport::setNonBlocking(int fd)
  *      There was a problem that prevented us from creating the session.
  */
 InfRcTransport::InfRcSession::InfRcSession(
-    InfRcTransport *transport, const ServiceLocator& sl, uint32_t timeoutMs)
+    InfRcTransport *transport, const ServiceLocator* sl, uint32_t timeoutMs)
     : transport(transport)
+    , serverAddress()
     , qp(NULL)
     , sessionAlarm(transport->context->sessionAlarmTimer, this,
             (timeoutMs != 0) ? timeoutMs : DEFAULT_TIMEOUT_MS)
 {
-    setServiceLocator(sl.getOriginalString());
+    setServiceLocator(sl->getOriginalString());
     IpAddress address(sl);
+    serverAddress = reinterpret_cast<struct sockaddr_in*>(
+            &address.address)->sin_addr;
 
     // create and set up a new queue pair for this client
     // This probably doesn't need to allocate memory
@@ -348,6 +381,8 @@ InfRcTransport::InfRcSession::InfRcSession(
 InfRcTransport::InfRcSession::~InfRcSession()
 {
     abort();
+    LOG(DEBUG, "Closing session with %s (client port %d)",
+            inet_ntoa(serverAddress), transport->clientPort);
 }
 
 // See documentation for Transport::Session::abort.
@@ -576,17 +611,18 @@ InfRcTransport::clientTryExchangeQueuePairs(struct sockaddr_in *sin,
             } else if (len != sizeof(*outgoingQpt)) {
                 LOG(ERROR, "sendto returned bad length (%Zd) while "
                     "sending to ip: [%s] port: [%d]", len,
-                    inet_ntoa(sin->sin_addr), HTONS(sin->sin_port));
+                    inet_ntoa(sin->sin_addr), NTOHS(sin->sin_port));
                 throw TransportException(HERE, errno);
             } else {
                 haveSent = true;
             }
         }
 
-        socklen_t sinlen = sizeof(sin);
+        struct sockaddr_in recvSin;
+        socklen_t sinlen = sizeof(recvSin);
         ssize_t len = recvfrom(clientSetupSocket, incomingQpt,
             sizeof(*incomingQpt), 0,
-            reinterpret_cast<sockaddr *>(&sin), &sinlen);
+            reinterpret_cast<sockaddr *>(&recvSin), &sinlen);
         if (len == -1) {
             if (errno != EINTR && errno != EAGAIN) {
                 LOG(ERROR, "recvfrom returned error %d: %s",
@@ -596,15 +632,16 @@ InfRcTransport::clientTryExchangeQueuePairs(struct sockaddr_in *sin,
         } else if (len != sizeof(*incomingQpt)) {
             LOG(ERROR, "recvfrom returned bad length (%Zd) while "
                 "receiving from ip: [%s] port: [%d]", len,
-                inet_ntoa(sin->sin_addr), HTONS(sin->sin_port));
+                inet_ntoa(recvSin.sin_addr), NTOHS(recvSin.sin_port));
             throw TransportException(HERE, errno);
         } else {
             if (outgoingQpt->getNonce() == incomingQpt->getNonce())
                 return true;
 
-            LOG(WARNING,
-                "received nonce doesn't match (0x%016lx != 0x%016lx)",
-                outgoingQpt->getNonce(), incomingQpt->getNonce());
+            LOG(WARNING, "bad nonce from %s (expected 0x%016lx, "
+                "got 0x%016lx, port %d); ignoring",
+                inet_ntoa(sin->sin_addr), outgoingQpt->getNonce(),
+                incomingQpt->getNonce(), clientPort);
         }
 
         double timeLeft = usTimeout - Cycles::toSeconds(Cycles::rdtsc() -
@@ -647,11 +684,14 @@ InfRcTransport::clientTrySetupQueuePair(IpAddress& address)
                                                 commonTxCq, clientRxCq,
                                                 MAX_TX_QUEUE_DEPTH,
                                                 MAX_SHARED_RX_QUEUE_DEPTH);
+    uint64_t nonce = generateRandom();
+    LOG(DEBUG, "starting to connect to %s via local port %d, nonce 0x%lx",
+            inet_ntoa(sin->sin_addr), clientPort, nonce);
 
     for (uint32_t i = 0; i < QP_EXCHANGE_MAX_TIMEOUTS; i++) {
         QueuePairTuple outgoingQpt(downCast<uint16_t>(lid),
                                    qp->getLocalQpNumber(),
-                                   qp->getInitialPsn(), generateRandom(),
+                                   qp->getInitialPsn(), nonce,
                                    name);
         QueuePairTuple incomingQpt;
         bool gotResponse;
@@ -675,6 +715,8 @@ InfRcTransport::clientTrySetupQueuePair(IpAddress& address)
             ++metrics->transport.retrySessionOpenCount;
             continue;
         }
+        LOG(DEBUG, "connected to %s via local port %d",
+                inet_ntoa(sin->sin_addr), clientPort);
 
         // plumb up our queue pair with the server's parameters.
         qp->plumb(&incomingQpt);
@@ -682,10 +724,11 @@ InfRcTransport::clientTrySetupQueuePair(IpAddress& address)
     }
 
     LOG(WARNING, "failed to exchange with server (%s) within allotted "
-        "%u microseconds (sent request %u times)",
+        "%u microseconds (sent request %u times, local port %d)",
         address.toString().c_str(),
         QP_EXCHANGE_USEC_TIMEOUT * QP_EXCHANGE_MAX_TIMEOUTS,
-        QP_EXCHANGE_MAX_TIMEOUTS);
+        QP_EXCHANGE_MAX_TIMEOUTS,
+        clientPort);
     delete qp;
     throw TransportException(HERE, "failed to connect to host");
 }
@@ -738,6 +781,12 @@ InfRcTransport::ServerConnectHandler::handleFileEvent(int events)
             MAX_SHARED_RX_QUEUE_DEPTH);
     qp->plumb(&incomingQpt);
     qp->setPeerName(incomingQpt.getPeerName());
+    LOG(DEBUG, "New queue pair for %s:%u, nonce 0x%lx (total creates "
+            "%d, deletes %d)",
+            inet_ntoa(sin.sin_addr), HTONS(sin.sin_port),
+            incomingQpt.getNonce(),
+            transport->infiniband->totalQpCreates,
+            transport->infiniband->totalQpDeletes);
 
     // now send the client back our queue pair information so they can
     // complete the initialisation.
@@ -858,6 +907,7 @@ InfRcTransport::reapTxBuffers()
     for (int i = 0; i < n; i++) {
         BufferDescriptor* bd =
             reinterpret_cast<BufferDescriptor*>(retArray[i].wr_id);
+        pendingOutputBytes -= bd->messageBytes;
         freeTxBuffers.push_back(bd);
 
         if (retArray[i].status != IBV_WC_SUCCESS) {
@@ -869,10 +919,6 @@ InfRcTransport::reapTxBuffers()
 
     // Has TX just transitioned to idle?
     if (n > 0 && freeTxBuffers.size() == MAX_TX_QUEUE_DEPTH) {
-        metrics->transport.infiniband.transmitActiveTicks +=
-            transmitCycleCounter->stop();
-        transmitCycleCounter.destroy();
-
         // It's now safe to delete queue pairs (see comment by declaration
         // for deadQueuePairs).
         while (!deadQueuePairs.empty()) {
@@ -927,6 +973,7 @@ InfRcTransport::sendZeroCopy(uint64_t nonce, Buffer* message, QueuePair* qp)
     uint32_t chunksUsed = 0;
     uint32_t sgesUsed = 0;
     BufferDescriptor* bd = getTransmitBuffer();
+    bd->messageBytes = message->size();
 
     // The variables below allow us to collect several chunks from the
     // Buffer into a single sge in some situations. They describe a
@@ -1015,15 +1062,14 @@ InfRcTransport::sendZeroCopy(uint64_t nonce, Buffer* message, QueuePair* qp)
 
     metrics->transport.transmit.iovecCount += sgesUsed;
     metrics->transport.transmit.byteCount += message->size();
-    if (!transmitCycleCounter) {
-        transmitCycleCounter.construct();
-    }
+    PerfStats::threadStats.networkOutputBytes += message->size();
     CycleCounter<RawMetric> _(&metrics->transport.transmit.ticks);
     ibv_send_wr* badTxWorkRequest;
     if (expect_true(!testingDontReallySend)) {
         if (ibv_post_send(qp->qp, &txWorkRequest, &badTxWorkRequest)) {
             throw TransportException(HERE, "ibv_post_send failed");
         }
+        pendingOutputBytes += bd->messageBytes;
     } else {
         for (int i = 0; i < txWorkRequest.num_sge; ++i) {
             const ibv_sge& sge = txWorkRequest.sg_list[i];
@@ -1087,7 +1133,6 @@ InfRcTransport::ServerRpc::sendReply()
     ReadRequestHandle_MetricSet::Interval interval(
             &ReadRequestHandle_MetricSet::serviceReturnToPostSend);
 
-    Transport::ServerRpc::returnToTransport.stop();
     CycleCounter<RawMetric> _(&metrics->transport.transmit.ticks);
     ++metrics->transport.transmit.messageCount;
     ++metrics->transport.transmit.packetCount;
@@ -1105,9 +1150,6 @@ InfRcTransport::ServerRpc::sendReply()
                     t->getMaxRpcSize()));
     }
 
-    if (!t->transmitCycleCounter) {
-        t->transmitCycleCounter.construct();
-    }
     t->sendZeroCopy(nonce, &replyPayload, qp);
     interval.stop();
 
@@ -1211,27 +1253,30 @@ InfRcTransport::ClientRpc::sendOrQueue()
  * checks for incoming RPC requests and responses and processes them.
  *
  * \return
- *      True if we were able to do anything useful, false if there was
- *      no meaningful data.
+ *      Nonzero if we were able to do anything useful, zero if there was
+ *      no work to be done.
  */
-void
+int
 InfRcTransport::Poller::poll()
 {
     InfRcTransport* t = transport;
     static const int MAX_COMPLETIONS = 10;
     ibv_wc wc[MAX_COMPLETIONS];
+    int foundWork = 0;
 
     // First check for responses to requests that we have made.
     if (!t->outstandingRpcs.empty()) {
         int numResponses = t->infiniband->pollCompletionQueue(t->clientRxCq,
                 MAX_COMPLETIONS, wc);
         for (int i = 0; i < numResponses; i++) {
+            foundWork = 1;
             ibv_wc* response = &wc[i];
             CycleCounter<RawMetric> receiveTicks;
             BufferDescriptor *bd =
                         reinterpret_cast<BufferDescriptor *>(response->wr_id);
             if (response->byte_len < 1000)
                 prefetch(bd->buffer, response->byte_len);
+            PerfStats::threadStats.networkInputBytes += response->byte_len;
             if (response->status != IBV_WC_SUCCESS) {
                 LOG(ERROR, "wc.status(%d:%s) != IBV_WC_SUCCESS",
                     response->status,
@@ -1297,7 +1342,17 @@ InfRcTransport::Poller::poll()
         CycleCounter<RawMetric> receiveTicks;
         int numRequests = t->infiniband->pollCompletionQueue(t->serverRxCq,
                 MAX_COMPLETIONS, wc);
+        if ((t->numFreeServerSrqBuffers - numRequests) == 0) {
+            // The receive buffer queue has run completely dry. This is bad
+            // for performance: if any requests arrive while the queue is empty,
+            // Infiniband imposes a long wait period (milliseconds?) before
+            // the caller retries.
+            RAMCLOUD_CLOG(WARNING, "Infiniband receive buffers ran out "
+                    "(%d new requests arrived); could cause significant "
+                    "delays", numRequests);
+        }
         for (int i = 0; i < numRequests; i++) {
+            foundWork = 1;
             ibv_wc* request = &wc[i];
             ReadRequestHandle_MetricSet::Interval interval
                 (&ReadRequestHandle_MetricSet::requestToHandleRpc);
@@ -1306,6 +1361,7 @@ InfRcTransport::Poller::poll()
                 reinterpret_cast<BufferDescriptor*>(request->wr_id);
             if (request->byte_len < 1000)
                 prefetch(bd->buffer, request->byte_len);
+            PerfStats::threadStats.networkInputBytes += request->byte_len;
 
             if (t->serverPortMap.find(request->qp_num)
                     == t->serverPortMap.end()) {
@@ -1327,11 +1383,16 @@ InfRcTransport::Poller::poll()
             ServerRpc *r = t->serverRpcPool.construct(t, qp, header.nonce);
 
             uint32_t len = request->byte_len - sizeof32(header);
-            if (t->numFreeServerSrqBuffers < 2) {
-                // Running low on buffers; copy the data so we can return
-                // the buffer immediately.
-                LOG(NOTICE, "Receive buffers running low; copying %u-byte "
-                    "request", len);
+            // It's very important that we don't let the receive buffer
+            // queue get completely empty (if this happens, Infiniband
+            // won't retry until after a long delay), so when the queue
+            // starts running low we copy incoming packets in order to
+            // return the buffers immediately. The constant below was
+            // originally 2, but that turned out not to be sufficient.
+            // Measurements of the YCSB benchmarks in 7/2015 suggest that
+            // a value of 4 is (barely) okay, but we now use 8 to provide a
+            // larger margin of safety, even if a burst of packets arrives.
+            if (t->numFreeServerSrqBuffers < 8) {
                 r->requestPayload.appendCopy(bd->buffer + sizeof(header), len);
                 t->postSrqReceiveAndKickTransmit(t->serverSrq, bd);
             } else {
@@ -1346,7 +1407,7 @@ InfRcTransport::Poller::poll()
             port->portAlarm.requestArrived(); // Restarts the port watchdog
             interval.stop();
             r->rpcServiceTime.start();
-            t->context->serviceManager->handleRpc(r);
+            t->context->workerManager->handleRpc(r);
             ++metrics->transport.receive.messageCount;
             ++metrics->transport.receive.packetCount;
             metrics->transport.receive.iovecCount +=
@@ -1362,10 +1423,16 @@ InfRcTransport::Poller::poll()
     // sent. It's done here in the hopes that it will happen when we
     // have nothing else to do, so it's effectively free.  It's much
     // more efficient if we can reclaim several buffers at once, so wait
-    // until buffers are running low before trying to reclaim.
+    // until buffers are running low before trying to reclaim.  This
+    // optimization improves the throughput of "clusterperf readThroughput"
+    // by about 5% (as of 7/2015).
     if (t->freeTxBuffers.size() < 3) {
         t->reapTxBuffers();
+        if (t->freeTxBuffers.size() >= 3) {
+            foundWork = 1;
+        }
     }
+    return foundWork;
 }
 
 //-------------------------------------

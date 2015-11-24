@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2014 Stanford University
+/* Copyright (c) 2011-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -47,7 +47,7 @@ class MembershipServiceTest : public ::testing::Test {
         , serverId(99, 2)
         , serverList(&context)
         , serverConfig(ServerConfig::forTesting())
-        , service(&serverList, &serverConfig)
+        , service(&context, &serverList, &serverConfig)
         , transport(&context)
         , mockRegistrar(&context, transport)
         , mutex()
@@ -55,8 +55,7 @@ class MembershipServiceTest : public ::testing::Test {
         , logEnabler()
     {
         context.externalStorage  = &storage;
-        transport.addService(service, "mock:host=member",
-                             WireFormat::MEMBERSHIP_SERVICE);
+        transport.registerServer(&context, "mock:host=member");
         serverList.testingAdd({serverId, "mock:host=member",
                                {WireFormat::PING_SERVICE}, 100,
                               ServerStatus::UP});
@@ -74,7 +73,7 @@ TEST_F(MembershipServiceTest, updateServerList_single) {
     context2.externalStorage = &storage;
     CoordinatorServerList source(&context2);
     source.haltUpdater();
-    CoordinatorService coordinatorService(&context2, 1000, false);
+    CoordinatorService coordinatorService(&context2, 1000, true);
     ServerId id1 = source.enlistServer({WireFormat::MASTER_SERVICE,
             WireFormat::PING_SERVICE}, 0, 100, "mock:host=55");
     ServerId id2 = source.enlistServer({WireFormat::MASTER_SERVICE,
@@ -105,7 +104,7 @@ TEST_F(MembershipServiceTest, updateServerList_multi) {
     context2.externalStorage = &storage;
     ProtoBuf::ServerList fullList, update2, update3;
     CoordinatorServerList source(&context2);
-    CoordinatorService coordinatorService(&context2, 1000, false);
+    CoordinatorService coordinatorService(&context2, 1000, true);
     source.haltUpdater();
 
     // Full List v1

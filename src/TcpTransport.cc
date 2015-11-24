@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any purpose
  * with or without fee is hereby granted, provided that the above copyright
@@ -15,12 +15,14 @@
 
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 
 #include "Common.h"
+#include "PerfStats.h"
 #include "ShortMacros.h"
-#include "ServiceManager.h"
 #include "TcpTransport.h"
+#include "WorkerManager.h"
 
 namespace RAMCloud {
 
@@ -65,7 +67,7 @@ TcpTransport::TcpTransport(Context* context,
 {
     if (serviceLocator == NULL)
         return;
-    IpAddress address(*serviceLocator);
+    IpAddress address(serviceLocator);
     locatorString = serviceLocator->getOriginalString();
 
     listenSocket = sys->socket(PF_INET, SOCK_STREAM, 0);
@@ -246,6 +248,13 @@ TcpTransport::AcceptHandler::handleFileEvent(int events)
         return;
     }
 
+    // Disable the hideous Nagle algorithm, which will delay sending small
+    // messages in some situations (before adding this code in 5/2015, we
+    // observed occasional 40ms delays when a server responded to a batch
+    // of requests from the same client).
+    int flag = 1;
+    setsockopt(acceptedFd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
     // At this point we have successfully opened a client connection.
     // Save information about it and create a handler for incoming
     // requests.
@@ -304,7 +313,7 @@ TcpTransport::ServerSocketHandler::handleFileEvent(int events)
                 // The incoming request is complete; pass it off for servicing.
                 TcpServerRpc *rpc = socket->rpc;
                 socket->rpc = NULL;
-                transport.context->serviceManager->handleRpc(rpc);
+                transport.context->workerManager->handleRpc(rpc);
             }
         }
         if (events & Dispatch::FileEvent::WRITABLE) {
@@ -413,8 +422,10 @@ TcpTransport::sendMessage(int fd, uint64_t nonce, Buffer* payload,
 
     int r = downCast<int>(sys->sendmsg(fd, &msg,
             MSG_NOSIGNAL|MSG_DONTWAIT));
-    if (r == bytesToSend)
+    if (r == bytesToSend) {
+        PerfStats::threadStats.networkOutputBytes += r;
         return 0;
+    }
 #if TESTING
     if ((r > 0) && (r < totalLength)) {
         messageChunks++;
@@ -428,6 +439,7 @@ TcpTransport::sendMessage(int fd, uint64_t nonce, Buffer* payload,
         }
         r = 0;
     }
+    PerfStats::threadStats.networkOutputBytes += r;
     return bytesToSend - r;
 }
 
@@ -454,6 +466,7 @@ ssize_t
 TcpTransport::recvCarefully(int fd, void* buffer, size_t length) {
     ssize_t actual = sys->recv(fd, buffer, length, MSG_DONTWAIT);
     if (actual > 0) {
+        PerfStats::threadStats.networkInputBytes += actual;
         return actual;
     }
     if (actual == 0) {
@@ -587,7 +600,7 @@ TcpTransport::IncomingMessage::readMessage(int fd) {
  *      There was a problem that prevented us from creating the session.
  */
 TcpTransport::TcpSession::TcpSession(TcpTransport& transport,
-        const ServiceLocator& serviceLocator,
+        const ServiceLocator* serviceLocator,
         uint32_t timeoutMs)
     : transport(transport)
     , address(serviceLocator)
@@ -601,7 +614,7 @@ TcpTransport::TcpSession::TcpSession(TcpTransport& transport,
     , alarm(transport.context->sessionAlarmTimer, this,
             (timeoutMs != 0) ? timeoutMs : DEFAULT_TIMEOUT_MS)
 {
-    setServiceLocator(serviceLocator.getOriginalString());
+    setServiceLocator(serviceLocator->getOriginalString());
     fd = sys->socket(PF_INET, SOCK_STREAM, 0);
     if (fd == -1) {
         LOG(WARNING, "TcpTransport couldn't open socket for session: %s",
@@ -620,6 +633,11 @@ TcpTransport::TcpSession::TcpSession(TcpTransport& transport,
                 "TcpTransport couldn't connect to %s",
                 getServiceLocator().c_str()), errno);
     }
+
+    // Disable the hideous Nagle algorithm, which will delay sending small
+    // messages in some situations.
+    int flag = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
     /// Arrange for notification whenever the server sends us data.
     Dispatch::Lock lock(transport.context->dispatch);

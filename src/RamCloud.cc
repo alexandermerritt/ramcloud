@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -16,7 +16,11 @@
 #include <stdarg.h>
 
 #include "RamCloud.h"
+#include "ClientLeaseAgent.h"
+#include "ClientTransactionManager.h"
 #include "CoordinatorSession.h"
+#include "Dispatch.h"
+#include "LinearizableObjectRpcWrapper.h"
 #include "FailSession.h"
 #include "MasterClient.h"
 #include "MultiIncrement.h"
@@ -24,7 +28,9 @@
 #include "MultiRemove.h"
 #include "MultiWrite.h"
 #include "Object.h"
+#include "ObjectFinder.h"
 #include "ProtoBuf.h"
+#include "RpcTracker.h"
 #include "ShortMacros.h"
 #include "TimeTrace.h"
 
@@ -63,10 +69,12 @@ static RejectRules defaultRejectRules;
  */
 RamCloud::RamCloud(const char* locator, const char* clusterName)
     : coordinatorLocator(locator)
-    , realClientContext()
-    , clientContext(realClientContext.construct(false))
+    , realClientContext(new Context(false))
+    , clientContext(realClientContext)
     , status(STATUS_OK)
-    , objectFinder(clientContext)
+    , clientLeaseAgent(new ClientLeaseAgent(this))
+    , rpcTracker(new RpcTracker())
+    , transactionManager(new ClientTransactionManager())
 {
     clientContext->coordinatorSession->setLocation(locator, clusterName);
 }
@@ -79,10 +87,12 @@ RamCloud::RamCloud(const char* locator, const char* clusterName)
 RamCloud::RamCloud(Context* context, const char* locator,
         const char* clusterName)
     : coordinatorLocator(locator)
-    , realClientContext()
+    , realClientContext(NULL)
     , clientContext(context)
     , status(STATUS_OK)
-    , objectFinder(clientContext)
+    , clientLeaseAgent(new ClientLeaseAgent(this))
+    , rpcTracker(new RpcTracker())
+    , transactionManager(new ClientTransactionManager())
 {
     clientContext->coordinatorSession->setLocation(locator, clusterName);
 }
@@ -93,10 +103,12 @@ RamCloud::RamCloud(Context* context, const char* locator,
 
 RamCloud::~RamCloud()
 {
-    // Force ObjectManager to drop all of its cached sessions; otherwise
-    // they won't get destroyed until after their transports have been deleted.
-    objectFinder.reset();
-    realClientContext.destroy();
+    delete clientLeaseAgent;
+
+    delete rpcTracker;
+    delete realClientContext;
+
+    delete transactionManager;
 }
 
 /**
@@ -115,6 +127,76 @@ RamCloud::poll()
     // anything (the dispatch thread will be polling continuously).
     if (clientContext->dispatch->isDispatchThread())
         clientContext->dispatch->poll();
+}
+
+/**
+ * Split an indexlet into two disjoint indexlets at a specific key.
+ * Check if the split already exists, in which case, just return.
+ * Ask the original server to migrate the second indexlet resulting from the
+ * split to another master having server id newOwner.
+ * Alert newOwner that it should begin servicing requests on that indexlet.
+ *
+ * \param newOwner
+ *      ServerId of the server that will own the second indexlet resulting
+ *      from the split of the original indexlet at the end of the operation.
+ * \param tableId
+ *      Id of the table to which the index belongs.
+ * \param indexId
+ *      Id of the secondary key for which this index stores information.
+ * \param splitKey
+ *      Key used to partition the indexlet into two. Keys less than
+ *      \a splitKey belong to one indexlet, keys greater than or equal to
+ *      \a splitKey belong to the other.
+ * \param splitKeyLength
+ *      Length of splitKey in bytes.
+ */
+void
+RamCloud::coordSplitAndMigrateIndexlet(
+        ServerId newOwner, uint64_t tableId, uint8_t indexId,
+        const void* splitKey, KeyLength splitKeyLength)
+{
+    CoordSplitAndMigrateIndexletRpc rpc(
+        this, newOwner, tableId, indexId, splitKey, splitKeyLength);
+    rpc.wait();
+}
+
+/**
+ * Constructor for CoordSplitAndMigrateIndexletRpc:
+ * initiates an RPC in the same way as #RamCloud::coordSplitAndMigrateIndexlet,
+ * but returns once the RPC has been initiated, without waiting for it to
+ * complete.
+ *
+ * \param ramcloud
+ *      The RAMCloud object that governs this RPC.
+ * \param newOwner
+ *      ServerId of the server that will own the second indexlet resulting
+ *      from the split of the original indexlet at the end of the operation.
+ * \param tableId
+ *      Id of the table to which the index belongs.
+ * \param indexId
+ *      Id of the secondary key for which this index stores information.
+ * \param splitKey
+ *      Key used to partition the indexlet into two. Keys less than
+ *      \a splitKey belong to one indexlet, keys greater than or equal to
+ *      \a splitKey belong to the other.
+ * \param splitKeyLength
+ *      Length of splitKey in bytes.
+ */
+CoordSplitAndMigrateIndexletRpc::CoordSplitAndMigrateIndexletRpc(
+        RamCloud* ramcloud,
+        ServerId newOwner, uint64_t tableId, uint8_t indexId,
+        const void* splitKey, KeyLength splitKeyLength)
+    : CoordinatorRpcWrapper(ramcloud->clientContext,
+            sizeof(WireFormat::CoordSplitAndMigrateIndexlet::Response))
+{
+    WireFormat::CoordSplitAndMigrateIndexlet::Request* reqHdr(
+            allocHeader<WireFormat::CoordSplitAndMigrateIndexlet>());
+    reqHdr->newOwnerId = newOwner.getId();
+    reqHdr->tableId = tableId;
+    reqHdr->indexId = indexId;
+    reqHdr->splitKeyLength = splitKeyLength;
+    request.appendCopy(splitKey, splitKeyLength);
+    send();
 }
 
 /**
@@ -228,7 +310,7 @@ DropTableRpc::DropTableRpc(RamCloud* ramcloud, const char* name)
 
 /**
  * Create a new index.
- * 
+ *
  * Creating an index has no impact on the existing objects in the table.
  * For example, it's possible that some of the objects in the table already
  * contain secondary keys corresponding to the new index;
@@ -236,14 +318,16 @@ DropTableRpc::DropTableRpc(RamCloud* ramcloud, const char* name)
  * To make these objects accessible via the index, the application must
  * rewrite them (for example, by enumerating all of the objects in the table
  * and rewriting each object with a key for the new index).
- * 
+ *
  * \param tableId
  *      Id of the table to which the index belongs.
  * \param indexId
  *      Id of the secondary keys corresponding to this index.
  *      Must be greater than 0. Id 0 is reserved for "primary key".
  * \param indexType
- *      Type of the index. Currently only supporting string type.
+ *      Type of the keys corresponding to this index.
+ *      Currently only string keys are supported, so this parameter is not yet
+ *      used (i.e., caller can provide any value).
  * \param numIndexlets
  *      Number of indexlets to partition the index key space.
  *      This is only for performance testing and unit tests.
@@ -270,7 +354,9 @@ RamCloud::createIndex(uint64_t tableId, uint8_t indexId, uint8_t indexType,
  *      Id of the secondary keys corresponding to this index.
  *      Must be greater than 0. Id 0 is reserved for "primary key".
  * \param indexType
- *      Type of the index. Currently only supporting string type.
+ *      Type of the keys corresponding to this index.
+ *      Currently only string keys are supported, so this parameter is not yet
+ *      used (i.e., caller can provide any value).
  * \param numIndexlets
  *      Number of indexlets to partition the index key space.
  *      This is only for performance testing, and value should always be 1 for
@@ -301,7 +387,7 @@ CreateIndexRpc::CreateIndexRpc(RamCloud* ramcloud, uint64_t tableId,
  * For example, any secondary keys related to the deleted index will
  * remain in objects. To eliminate those secondary keys, an application must
  * enumerate all of the objects in the table and rewrite them without the keys.
- * 
+ *
  * \param tableId
  *      Id of the table to which the index belongs.
  * \param indexId
@@ -427,7 +513,7 @@ RamCloud::enumerateTable(uint64_t tableId, bool keysOnly,
  */
 EnumerateTableRpc::EnumerateTableRpc(RamCloud* ramcloud, uint64_t tableId,
         bool keysOnly, uint64_t tabletFirstHash, Buffer& state, Buffer& objects)
-    : ObjectRpcWrapper(ramcloud, tableId, tabletFirstHash,
+    : ObjectRpcWrapper(ramcloud->clientContext, tableId, tabletFirstHash,
             sizeof(WireFormat::Enumerate::Response), &objects)
 {
     WireFormat::Enumerate::Request* reqHdr(
@@ -465,7 +551,7 @@ EnumerateTableRpc::EnumerateTableRpc(RamCloud* ramcloud, uint64_t tableId,
 uint64_t
 EnumerateTableRpc::wait(Buffer& state)
 {
-    simpleWait(ramcloud->clientContext->dispatch);
+    simpleWait(context);
     const WireFormat::Enumerate::Response* respHdr(
             getResponseHeader<WireFormat::Enumerate>());
     uint64_t result = respHdr->tabletFirstHash;
@@ -607,7 +693,7 @@ RamCloud::getMetrics(uint64_t tableId, const void* key, uint16_t keyLength)
  */
 GetMetricsRpc::GetMetricsRpc(RamCloud* ramcloud, uint64_t tableId,
         const void* key, uint16_t keyLength)
-    : ObjectRpcWrapper(ramcloud, tableId, key, keyLength,
+    : ObjectRpcWrapper(ramcloud->clientContext, tableId, key, keyLength,
             sizeof(WireFormat::GetMetrics::Response))
 {
     allocHeader<WireFormat::GetMetrics>();
@@ -625,7 +711,7 @@ GetMetricsRpc::GetMetricsRpc(RamCloud* ramcloud, uint64_t tableId,
 ServerMetrics
 GetMetricsRpc::wait()
 {
-    waitInternal(ramcloud->clientContext->dispatch);
+    waitInternal(context->dispatch);
     const WireFormat::GetMetrics::Response* respHdr(
             getResponseHeader<WireFormat::GetMetrics>());
 
@@ -981,7 +1067,7 @@ RamCloud::incrementDouble(uint64_t tableId, const void* key, uint16_t keyLength,
 
 /**
  * Constructor for IncrementDoubleRpc: initiates an RPC in the same way as
- * #RamCloud::incrementDouble, but returns once the RPC has been initiated, 
+ * #RamCloud::incrementDouble, but returns once the RPC has been initiated,
  * without waiting for it to complete.
  *
  * \param ramcloud
@@ -1006,7 +1092,7 @@ RamCloud::incrementDouble(uint64_t tableId, const void* key, uint16_t keyLength,
 IncrementDoubleRpc::IncrementDoubleRpc(RamCloud* ramcloud, uint64_t tableId,
         const void* key, uint16_t keyLength, double incrementValue,
         const RejectRules* rejectRules)
-    : ObjectRpcWrapper(ramcloud, tableId, key, keyLength,
+    : LinearizableObjectRpcWrapper(ramcloud, true, tableId, key, keyLength,
             sizeof(WireFormat::Increment::Response))
 {
     WireFormat::Increment::Request* reqHdr(
@@ -1017,6 +1103,7 @@ IncrementDoubleRpc::IncrementDoubleRpc(RamCloud* ramcloud, uint64_t tableId,
     reqHdr->incrementDouble = incrementValue;
     reqHdr->rejectRules = rejectRules ? *rejectRules : defaultRejectRules;
     request.append(key, keyLength);
+    fillLinearizabilityHeader<WireFormat::Increment::Request>(reqHdr);
     send();
 }
 
@@ -1031,7 +1118,7 @@ IncrementDoubleRpc::IncrementDoubleRpc(RamCloud* ramcloud, uint64_t tableId,
 double
 IncrementDoubleRpc::wait(uint64_t* version)
 {
-    waitInternal(ramcloud->clientContext->dispatch);
+    waitInternal(context->dispatch);
     const WireFormat::Increment::Response* respHdr(
             getResponseHeader<WireFormat::Increment>());
     if (version != NULL)
@@ -1109,7 +1196,7 @@ RamCloud::incrementInt64(uint64_t tableId, const void* key, uint16_t keyLength,
 IncrementInt64Rpc::IncrementInt64Rpc(RamCloud* ramcloud, uint64_t tableId,
         const void* key, uint16_t keyLength, int64_t incrementValue,
         const RejectRules* rejectRules)
-    : ObjectRpcWrapper(ramcloud, tableId, key, keyLength,
+    : LinearizableObjectRpcWrapper(ramcloud, true, tableId, key, keyLength,
             sizeof(WireFormat::Increment::Response))
 {
     WireFormat::Increment::Request* reqHdr(
@@ -1120,6 +1207,7 @@ IncrementInt64Rpc::IncrementInt64Rpc(RamCloud* ramcloud, uint64_t tableId,
     reqHdr->incrementDouble = 0.0;
     reqHdr->rejectRules = rejectRules ? *rejectRules : defaultRejectRules;
     request.append(key, keyLength);
+    fillLinearizabilityHeader<WireFormat::Increment::Request>(reqHdr);
     send();
 }
 
@@ -1134,7 +1222,7 @@ IncrementInt64Rpc::IncrementInt64Rpc(RamCloud* ramcloud, uint64_t tableId,
 int64_t
 IncrementInt64Rpc::wait(uint64_t* version)
 {
-    waitInternal(ramcloud->clientContext->dispatch);
+    waitInternal(context->dispatch);
     const WireFormat::Increment::Response* respHdr(
             getResponseHeader<WireFormat::Increment>());
     if (version != NULL)
@@ -1218,7 +1306,7 @@ RamCloud::readHashes(uint64_t tableId, uint32_t numHashes, Buffer* pKHashes,
  */
 ReadHashesRpc::ReadHashesRpc(RamCloud* ramcloud, uint64_t tableId,
         uint32_t numHashes, Buffer* pKHashes, Buffer* response)
-    : ObjectRpcWrapper(ramcloud, tableId,
+    : ObjectRpcWrapper(ramcloud->clientContext, tableId,
             *(pKHashes->getStart<uint64_t>()),
             sizeof(WireFormat::ReadHashes::Response), response)
 {
@@ -1251,7 +1339,7 @@ ReadHashesRpc::ReadHashesRpc(RamCloud* ramcloud, uint64_t tableId,
 uint32_t
 ReadHashesRpc::wait(uint32_t* numObjects)
 {
-    simpleWait(ramcloud->clientContext->dispatch);
+    simpleWait(context);
     const WireFormat::ReadHashes::Response* respHdr(
             getResponseHeader<WireFormat::ReadHashes>());
     *numObjects = respHdr->numObjects;
@@ -1389,17 +1477,17 @@ IndexServerControlRpc::wait()
  * The next RPC, if needed, would be initiated by the client by setting
  * firstKey in new request = nextKey from previous response, AND
  * firstAllowedKeyHash in new request = (nextKeyHash from previous resp) + 1.
- * 
+ *
  * This rpc would get sent to the server owning that firstKey.
  * This could be S1 in case it couldn't fit all the key hashes in a single RPC
  * the first time it sent the response, or a different server S2 in case S1
  * didn't own the new key range.
- * 
+ *
  * The caller can tell that the range is completely enumerated if the response
  * to an rpc has nextKeyLength = 0 (i.e., returns no nextKey) and
  * nextKeyHash = 0 (i.e., no nextKeyHash).
  *
- * 
+ *
  * \param tableId
  *      Id of the table in which lookup is to be done.
  * \param indexId
@@ -1453,8 +1541,8 @@ RamCloud::lookupIndexKeys(uint64_t tableId, uint8_t indexId,
         uint64_t firstAllowedKeyHash,
         const void* lastKey, uint16_t lastKeyLength,
         uint32_t maxNumHashes,
-        Buffer* responseBuffer, uint32_t* numHashes, uint16_t* nextKeyLength,
-        uint64_t* nextKeyHash)
+        Buffer* responseBuffer, uint32_t* numHashes,
+        uint16_t* nextKeyLength, uint64_t* nextKeyHash)
 {
     LookupIndexKeysRpc rpc(this, tableId, indexId,
             firstKey, firstKeyLength, firstAllowedKeyHash,
@@ -1477,7 +1565,8 @@ RamCloud::lookupIndexKeys(uint64_t tableId, uint8_t indexId,
  * \param firstKey
  *      Starting key for the key range in which keys are to be matched.
  *      The key range includes the firstKey.
- *      It does not necessarily have to be null terminated.  The caller must
+ *      NULL value indicates lowest possible key.
+ *      It does not necessarily have to be null terminated. The caller must
  *      ensure that the storage for this key is unchanged through the life of
  *      the RPC.
  * \param firstKeyLength
@@ -1487,7 +1576,8 @@ RamCloud::lookupIndexKeys(uint64_t tableId, uint8_t indexId,
  * \param lastKey
  *      Ending key for the key range in which keys are to be matched.
  *      The key range includes the lastKey.
- *      It does not necessarily have to be null terminated.  The caller must
+ *      NULL value indicates highest possible key.
+ *      It does not necessarily have to be null terminated. The caller must
  *      ensure that the storage for this key is unchanged through the life of
  *      the RPC.
  * \param lastKeyLength
@@ -1554,7 +1644,7 @@ void
 LookupIndexKeysRpc::wait(uint32_t* numHashes, uint16_t* nextKeyLength,
         uint64_t* nextKeyHash)
 {
-    simpleWait(context->dispatch);
+    simpleWait(context);
 
     const WireFormat::LookupIndexKeys::Response* respHdr(
             getResponseHeader<WireFormat::LookupIndexKeys>());
@@ -1604,7 +1694,7 @@ RamCloud::migrateTablet(uint64_t tableId, uint64_t firstKeyHash,
 MigrateTabletRpc::MigrateTabletRpc(RamCloud* ramcloud, uint64_t tableId,
         uint64_t firstKeyHash, uint64_t lastKeyHash,
         ServerId newOwnerMasterId)
-    : ObjectRpcWrapper(ramcloud, tableId, firstKeyHash,
+    : ObjectRpcWrapper(ramcloud->clientContext, tableId, firstKeyHash,
             sizeof(WireFormat::MigrateTablet::Response))
 {
     WireFormat::MigrateTablet::Request* reqHdr(
@@ -1617,7 +1707,7 @@ MigrateTabletRpc::MigrateTabletRpc(RamCloud* ramcloud, uint64_t tableId,
 }
 
 /**
- * Increment multiple objects. This method has two performance advantages over 
+ * Increment multiple objects. This method has two performance advantages over
  * calling RamCloud::increment separately for each object:
  * - If multiple objects are stored on a single server, this method
  *   issues a single RPC to increment all of them at once.
@@ -1698,40 +1788,6 @@ RamCloud::multiWrite(MultiWriteObject* requests[], uint32_t numRequests)
 {
     MultiWrite request(this, requests, numRequests);
     request.wait();
-}
-
-/**
- * Ask the coordinator to broadcast a quiesce request to all backups.  When
- * this method returns, all backups will have flushed active segment replicas
- * to disk.  This is used primarily during recovery testing: it allows more
- * accurate performance measurements.
- */
-void
-RamCloud::quiesce()
-{
-    QuiesceRpc rpc(this);
-    rpc.wait();
-}
-
-/**
- * Constructor for HintServerCrashedRpc: initiates an RPC in the same way as
- * #RamCloud::hintServerCrashed, but returns once the RPC has been
- * initiated, without waiting for it to complete.
- *
- * \param ramcloud
- *      The RAMCloud object that governs this RPC.
- */
-QuiesceRpc::QuiesceRpc(RamCloud* ramcloud)
-    : CoordinatorRpcWrapper(ramcloud->clientContext,
-            sizeof(WireFormat::BackupQuiesce::Response))
-{
-    WireFormat::BackupQuiesce::Request* reqHdr(
-            allocHeader<WireFormat::BackupQuiesce>(ServerId(0)));
-    // By default this RPC is sent to the backup service; retarget it
-    // for the coordinator service (which will forward it on to all
-    // backups).
-    reqHdr->common.service = WireFormat::COORDINATOR_SERVICE;
-    send();
 }
 
 /**
@@ -1822,7 +1878,7 @@ RamCloud::readKeysAndValue(uint64_t tableId, const void* key,
 ReadRpc::ReadRpc(RamCloud* ramcloud, uint64_t tableId,
         const void* key, uint16_t keyLength, Buffer* value,
         const RejectRules* rejectRules)
-    : ObjectRpcWrapper(ramcloud, tableId, key, keyLength,
+    : ObjectRpcWrapper(ramcloud->clientContext, tableId, key, keyLength,
             sizeof(WireFormat::Read::Response), value)
 {
     value->reset();
@@ -1844,7 +1900,7 @@ ReadRpc::ReadRpc(RamCloud* ramcloud, uint64_t tableId,
 void
 ReadRpc::wait(uint64_t* version)
 {
-    waitInternal(ramcloud->clientContext->dispatch);
+    waitInternal(context->dispatch);
     const WireFormat::Read::Response* respHdr(
             getResponseHeader<WireFormat::Read>());
     if (version != NULL)
@@ -1887,7 +1943,7 @@ ReadRpc::wait(uint64_t* version)
 ReadKeysAndValueRpc::ReadKeysAndValueRpc(RamCloud* ramcloud, uint64_t tableId,
         const void* key, uint16_t keyLength, ObjectBuffer* value,
         const RejectRules* rejectRules)
-    : ObjectRpcWrapper(ramcloud, tableId, key, keyLength,
+    : ObjectRpcWrapper(ramcloud->clientContext, tableId, key, keyLength,
             sizeof(WireFormat::ReadKeysAndValue::Response), value)
 {
     value->reset();
@@ -1910,7 +1966,7 @@ ReadKeysAndValueRpc::ReadKeysAndValueRpc(RamCloud* ramcloud, uint64_t tableId,
 void
 ReadKeysAndValueRpc::wait(uint64_t* version)
 {
-    waitInternal(ramcloud->clientContext->dispatch);
+    waitInternal(context->dispatch);
     const WireFormat::ReadKeysAndValue::Response* respHdr(
             getResponseHeader<WireFormat::ReadKeysAndValue>());
     if (version != NULL)
@@ -1978,7 +2034,7 @@ RamCloud::remove(uint64_t tableId, const void* key, uint16_t keyLength,
  */
 RemoveRpc::RemoveRpc(RamCloud* ramcloud, uint64_t tableId,
         const void* key, uint16_t keyLength, const RejectRules* rejectRules)
-    : ObjectRpcWrapper(ramcloud, tableId, key, keyLength,
+    : LinearizableObjectRpcWrapper(ramcloud, true, tableId, key, keyLength,
             sizeof(WireFormat::Remove::Response))
 {
     WireFormat::Remove::Request* reqHdr(allocHeader<WireFormat::Remove>());
@@ -1986,6 +2042,7 @@ RemoveRpc::RemoveRpc(RamCloud* ramcloud, uint64_t tableId,
     reqHdr->keyLength = keyLength;
     reqHdr->rejectRules = rejectRules ? *rejectRules : defaultRejectRules;
     request.append(key, keyLength);
+    fillLinearizabilityHeader<WireFormat::Remove::Request>(reqHdr);
     send();
 }
 
@@ -2000,7 +2057,7 @@ RemoveRpc::RemoveRpc(RamCloud* ramcloud, uint64_t tableId,
 void
 RemoveRpc::wait(uint64_t* version)
 {
-    waitInternal(ramcloud->clientContext->dispatch);
+    waitInternal(context->dispatch);
     const WireFormat::Remove::Response* respHdr(
             getResponseHeader<WireFormat::Remove>());
     if (version != NULL)
@@ -2087,7 +2144,7 @@ ObjectServerControlRpc::ObjectServerControlRpc(RamCloud* ramcloud,
         uint64_t tableId, const void* key, uint16_t keyLength,
         WireFormat::ControlOp controlOp,
         const void* inputData, uint32_t inputLength, Buffer* outputData)
-    : ObjectRpcWrapper(ramcloud, tableId, key, keyLength,
+    : ObjectRpcWrapper(ramcloud->clientContext, tableId, key, keyLength,
             sizeof(WireFormat::ServerControl::Response), outputData)
 {
     WireFormat::ServerControl::Request*
@@ -2111,7 +2168,7 @@ ObjectServerControlRpc::ObjectServerControlRpc(RamCloud* ramcloud,
 void
 ObjectServerControlRpc::wait()
 {
-    waitInternal(ramcloud->clientContext->dispatch);
+    waitInternal(context->dispatch);
     const WireFormat::ServerControl::Response* respHdr(
             getResponseHeader<WireFormat::ServerControl>());
     // Truncate the response Buffer so that it consists of nothing
@@ -2128,7 +2185,7 @@ ObjectServerControlRpc::wait()
  * the objectServerControl method.
  *
  * \param controlOp
- *      This defines the specific operation to be performed on each server.
+ *      This defines the specific to be performed on each server.
  * \param inputData
  *      Input data, such as additional parameters, specific for the
  *      particular operation to be performed. Not all operations use
@@ -2324,7 +2381,7 @@ RamCloud::testingFill(uint64_t tableId, const void* key, uint16_t keyLength,
 FillWithTestDataRpc::FillWithTestDataRpc(RamCloud* ramcloud,
         uint64_t tableId, const void* key, uint16_t keyLength,
         uint32_t numObjects, uint32_t objectSize)
-    : ObjectRpcWrapper(ramcloud, tableId, key, keyLength,
+    : ObjectRpcWrapper(ramcloud->clientContext, tableId, key, keyLength,
             sizeof(WireFormat::FillWithTestData::Response))
 {
     WireFormat::FillWithTestData::Request* reqHdr(
@@ -2409,7 +2466,8 @@ RamCloud::testingGetServerId(uint64_t tableId,
         const void* key, uint16_t keyLength)
 {
     KeyHash keyHash = Key::getHash(tableId, key, keyLength);
-    return objectFinder.lookupTablet(tableId, keyHash)->tablet.serverId.getId();
+    return clientContext->objectFinder->lookupTablet(tableId,
+            keyHash)->tablet.serverId.getId();
 }
 
 /**
@@ -2425,7 +2483,8 @@ RamCloud::testingGetServiceLocator(uint64_t tableId,
         const void* key, uint16_t keyLength)
 {
     KeyHash keyHash = Key::getHash(tableId, key, keyLength);
-    return objectFinder.lookupTablet(tableId, keyHash)->serviceLocator;
+    return clientContext->objectFinder->lookupTablet(tableId, keyHash)->
+                serviceLocator;
 }
 
 /**
@@ -2446,7 +2505,7 @@ void
 RamCloud::testingKill(uint64_t tableId, const void* key, uint16_t keyLength)
 {
     KillRpc rpc(this, tableId, key, keyLength);
-    objectFinder.waitForTabletDown(tableId);
+    clientContext->objectFinder->waitForTabletDown(tableId);
 }
 
 /**
@@ -2469,7 +2528,7 @@ RamCloud::testingKill(uint64_t tableId, const void* key, uint16_t keyLength)
  */
 KillRpc::KillRpc(RamCloud* ramcloud, uint64_t tableId,
         const void* key, uint16_t keyLength)
-    : ObjectRpcWrapper(ramcloud, tableId, key, keyLength,
+    : ObjectRpcWrapper(ramcloud->clientContext, tableId, key, keyLength,
             sizeof(WireFormat::Kill::Response))
 {
     allocHeader<WireFormat::Kill>();
@@ -2536,7 +2595,7 @@ SetRuntimeOptionRpc::SetRuntimeOptionRpc(RamCloud* ramcloud,
 void
 RamCloud::testingWaitForAllTabletsNormal(uint64_t tableId, uint64_t timeoutNs)
 {
-    objectFinder.waitForAllTabletsNormal(tableId, timeoutNs);
+    clientContext->objectFinder->waitForAllTabletsNormal(tableId, timeoutNs);
 }
 
 /**
@@ -2715,7 +2774,6 @@ RamCloud::write(uint64_t tableId, uint8_t numKeys, KeyInfo *keyList,
  *
  * \exception RejectRulesException
  */
-
 void
 RamCloud::write(uint64_t tableId, uint8_t numKeys, KeyInfo *keyList,
         const char* value, const RejectRules* rejectRules, uint64_t* version,
@@ -2761,8 +2819,8 @@ RamCloud::write(uint64_t tableId, uint8_t numKeys, KeyInfo *keyList,
 WriteRpc::WriteRpc(RamCloud* ramcloud, uint64_t tableId,
         const void* key, uint16_t keyLength, const void* buf, uint32_t length,
         const RejectRules* rejectRules, bool async)
-    : ObjectRpcWrapper(ramcloud, tableId, key, keyLength,
-            sizeof(WireFormat::Write::Response))
+    : LinearizableObjectRpcWrapper(ramcloud, true, tableId, key,
+            keyLength, sizeof(WireFormat::Write::Response))
 {
     WireFormat::Write::Request* reqHdr(allocHeader<WireFormat::Write>());
     reqHdr->tableId = tableId;
@@ -2777,11 +2835,14 @@ WriteRpc::WriteRpc(RamCloud* ramcloud, uint64_t tableId,
 
     Key primaryKey(tableId, key, currentKeyLength);
     Object::appendKeysAndValueToBuffer(primaryKey, buf, length,
-                                       &request, &totalLength);
+                                       &request, false, &totalLength);
 
     reqHdr->rejectRules = rejectRules ? *rejectRules : defaultRejectRules;
     reqHdr->async = async;
     reqHdr->length = totalLength;
+
+    fillLinearizabilityHeader<WireFormat::Write::Request>(reqHdr);
+
     send();
 }
 
@@ -2819,7 +2880,7 @@ WriteRpc::WriteRpc(RamCloud* ramcloud, uint64_t tableId,
 WriteRpc::WriteRpc(RamCloud* ramcloud, uint64_t tableId,
         uint8_t numKeys, KeyInfo *keyList, const void* buf, uint32_t length,
         const RejectRules* rejectRules, bool async)
-    : ObjectRpcWrapper(ramcloud, tableId,
+    : LinearizableObjectRpcWrapper(ramcloud, true, tableId,
             keyList[0].key, keyList[0].keyLength,
             sizeof(WireFormat::Write::Response))
 {
@@ -2834,6 +2895,9 @@ WriteRpc::WriteRpc(RamCloud* ramcloud, uint64_t tableId,
     reqHdr->rejectRules = rejectRules ? *rejectRules : defaultRejectRules;
     reqHdr->async = async;
     reqHdr->length = totalLength;
+
+    fillLinearizabilityHeader<WireFormat::Write::Request>(reqHdr);
+
     send();
 }
 
@@ -2848,9 +2912,10 @@ WriteRpc::WriteRpc(RamCloud* ramcloud, uint64_t tableId,
 void
 WriteRpc::wait(uint64_t* version)
 {
-    waitInternal(ramcloud->clientContext->dispatch);
+    waitInternal(context->dispatch);
     const WireFormat::Write::Response* respHdr(
             getResponseHeader<WireFormat::Write>());
+
     if (version != NULL)
         *version = respHdr->version;
 

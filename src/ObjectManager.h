@@ -1,4 +1,4 @@
-/* Copyright (c) 2014 Stanford University
+/* Copyright (c) 2014-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -23,13 +23,19 @@
 #include "HashTable.h"
 #include "IndexKey.h"
 #include "Object.h"
+#include "PreparedOps.h"
 #include "SegmentManager.h"
 #include "SegmentIterator.h"
 #include "ReplicaManager.h"
+#include "RpcResult.h"
 #include "ServerConfig.h"
 #include "SpinLock.h"
 #include "TabletManager.h"
+#include "TxDecisionRecord.h"
+#include "TxRecoveryManager.h"
 #include "MasterTableMetadata.h"
+#include "UnackedRpcResults.h"
+#include "LockTable.h"
 
 namespace RAMCloud {
 
@@ -46,14 +52,19 @@ namespace RAMCloud {
  * ObjectManager is thread-safe. Multiple worker threads in MasterService may
  * call into it simultaneously.
  */
-class ObjectManager : public LogEntryHandlers {
+class ObjectManager : public LogEntryHandlers,
+                      public AbstractLog::ReferenceFreer {
   public:
 
     ObjectManager(Context* context, ServerId* serverId,
                 const ServerConfig* config,
                 TabletManager* tabletManager,
-                MasterTableMetadata* masterTableMetadata);
+                MasterTableMetadata* masterTableMetadata,
+                UnackedRpcResults* unackedRpcResults,
+                PreparedOps* preparedOps,
+                TxRecoveryManager* txRecoveryManager);
     virtual ~ObjectManager();
+    virtual void freeLogEntry(Log::Reference ref);
     void initOnceEnlisted();
 
     void readHashes(const uint64_t tableId, uint32_t reqNumHashes,
@@ -65,14 +76,33 @@ class ObjectManager : public LogEntryHandlers {
                 RejectRules* rejectRules, uint64_t* outVersion,
                 bool valueOnly = false);
     Status removeObject(Key& key, RejectRules* rejectRules,
-                uint64_t* outVersion, Buffer* removedObjBuffer = NULL);
+                uint64_t* outVersion, Buffer* removedObjBuffer = NULL,
+                RpcResult* rpcResult = NULL, uint64_t* rpcResultPtr = NULL);
     void removeOrphanedObjects();
     void replaySegment(SideLog* sideLog, SegmentIterator& it,
-                std::unordered_map<uint64_t, uint64_t>& highestBTreeIdMap);
+                std::unordered_map<uint64_t, uint64_t>* nextNodeIdMap);
     void replaySegment(SideLog* sideLog, SegmentIterator& it);
     void syncChanges();
     Status writeObject(Object& newObject, RejectRules* rejectRules,
-                uint64_t* outVersion, Buffer* removedObjBuffer = NULL);
+                uint64_t* outVersion, Buffer* removedObjBuffer = NULL,
+                RpcResult* rpcResult = NULL, uint64_t* rpcResultPtr = NULL);
+    bool keyPointsAtReference(Key& k, AbstractLog::Reference oldReference);
+    void writePrepareFail(RpcResult* rpcResult, uint64_t* rpcResultPtr);
+    void writeRpcResultOnly(RpcResult* rpcResult, uint64_t* rpcResultPtr);
+    Status logTransactionParticipantList(ParticipantList& participantList,
+                uint64_t* participantListLogRef);
+    Status prepareOp(PreparedOp& newOp, RejectRules* rejectRules,
+                uint64_t* newOpPtr, bool* isCommitVote,
+                RpcResult* rpcResult, uint64_t* rpcResultPtr);
+    Status prepareReadOnly(PreparedOp& newOp, RejectRules* rejectRules,
+                bool* isCommitVote);
+    Status tryGrabTxLock(Object& objToLock, Log::Reference& ref);
+    Status writeTxDecisionRecord(TxDecisionRecord& record);
+    Status commitRead(PreparedOp& op, Log::Reference& refToPreparedOp);
+    Status commitRemove(PreparedOp& op, Log::Reference& refToPreparedOp,
+                        Buffer* removedObjBuffer = NULL);
+    Status commitWrite(PreparedOp& op, Log::Reference& refToPreparedOp,
+                        Buffer* removedObjBuffer = NULL);
 
     /**
      * The following three methods are used when multiple log entries
@@ -207,7 +237,7 @@ class ObjectManager : public LogEntryHandlers {
       public:
         RemoveTombstonePoller(ObjectManager* objectManager,
                         HashTable* objectMap);
-        virtual void poll();
+        virtual int poll();
 
       PRIVATE:
         /// Which bucket of #objectMap should be cleaned out next.
@@ -239,6 +269,7 @@ class ObjectManager : public LogEntryHandlers {
     static string dumpSegment(Segment* segment);
     uint32_t getObjectTimestamp(Buffer& buffer);
     uint32_t getTombstoneTimestamp(Buffer& buffer);
+    uint32_t getTxDecisionRecordTimestamp(Buffer& buffer);
     bool lookup(HashTableBucketLock& lock, Key& key,
                 LogEntryType& outType, Buffer& buffer,
                 uint64_t* outVersion = NULL,
@@ -253,7 +284,17 @@ class ObjectManager : public LogEntryHandlers {
                 __attribute__((warn_unused_result));
     void relocateObject(Buffer& oldBuffer, Log::Reference oldReference,
                 LogEntryRelocator& relocator);
-    void relocateTombstone(Buffer& oldBuffer, LogEntryRelocator& relocator);
+    void relocatePreparedOp(Buffer& oldBuffer, Log::Reference oldReference,
+                LogEntryRelocator& relocator);
+    void relocatePreparedOpTombstone(Buffer& oldBuffer,
+                                     LogEntryRelocator& relocator);
+    void relocateRpcResult(Buffer& oldBuffer, LogEntryRelocator& relocator);
+    void relocateTombstone(Buffer& oldBuffer, Log::Reference oldReference,
+            LogEntryRelocator& relocator);
+    void relocateTxDecisionRecord(
+            Buffer& oldBuffer, LogEntryRelocator& relocator);
+    void relocateTxParticipantList(
+            Buffer& oldBuffer, LogEntryRelocator& relocator);
     bool replace(HashTableBucketLock& lock, Key& key, Log::Reference reference);
 
     /**
@@ -281,6 +322,21 @@ class ObjectManager : public LogEntryHandlers {
      * Used to update table statistics.
      */
     MasterTableMetadata* masterTableMetadata;
+
+    /**
+     * Used to managed cleaning and recovery of RpcResult objects.
+     */
+    UnackedRpcResults* unackedRpcResults;
+
+    /**
+     * Used to manage cleaning and recovery of PreparedOp objects.
+     */
+    PreparedOps* preparedOps;
+
+    /**
+     * Used to managed cleaning and recovery of RpcResult objects.
+     */
+    TxRecoveryManager* txRecoveryManager;
 
     /**
      * Allocator used by the SegmentManager to obtain main memory for log
@@ -331,6 +387,11 @@ class ObjectManager : public LogEntryHandlers {
      * cleaner.
      */
     SpinLock hashTableBucketLocks[1024];
+
+    /**
+     * Locks objects during transactions.
+     */
+    LockTable lockTable;
 
     /**
      * Number of times the replaySegment() method returned (or threw an

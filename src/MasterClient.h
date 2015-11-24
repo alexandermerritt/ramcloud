@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -17,12 +17,10 @@
 #define RAMCLOUD_MASTERCLIENT_H
 
 #include "Buffer.h"
-#include "Common.h"
 #include "CoordinatorClient.h"
 #include "IndexRpcWrapper.h"
 #include "Key.h"
-#include "Log.h"
-#include "Segment.h"
+#include "LogMetadata.h"
 #include "ServerId.h"
 #include "ServerIdRpcWrapper.h"
 #include "ServerStatistics.pb.h"
@@ -33,6 +31,7 @@ namespace RAMCloud {
 
 // forward declaration
 class MasterService;
+class Segment;
 
 /**
  * Provides methods for invoking RPCs to RAMCloud masters.  The invoking
@@ -43,18 +42,25 @@ class MasterService;
  */
 class MasterClient {
   public:
+    static void dropIndexletOwnership(Context* context, ServerId id,
+            uint64_t tableId, uint8_t indexId, const void *firstKey,
+            uint16_t firstKeyLength, const void *firstNotOwnedKey,
+            uint16_t firstNotOwnedKeyLength);
     static void dropTabletOwnership(Context* context, ServerId serverId,
             uint64_t tableId, uint64_t firstKeyHash, uint64_t lastKeyHash);
-    static Log::Position getHeadOfLog(Context* context, ServerId serverId);
+    static LogPosition getHeadOfLog(Context* context, ServerId serverId);
     static void insertIndexEntry(MasterService* master,
             uint64_t tableId, uint8_t indexId,
             const void* indexKey, KeyLength indexKeyLength,
             uint64_t primaryKeyHash);
     static bool isReplicaNeeded(Context* context, ServerId serverId,
             ServerId backupServerId, uint64_t segmentId);
+    static void prepForIndexletMigration(Context* context, ServerId serverId,
+            uint64_t tableId, uint8_t indexId, uint64_t backingTableId,
+            const void* firstKey, uint16_t firstKeyLength,
+            const void* firstNotOwnedKey, uint16_t firstNotOwnedKeyLength);
     static void prepForMigration(Context* context, ServerId serverId,
-            uint64_t tableId, uint64_t firstKeyHash, uint64_t lastKeyHash,
-            uint64_t expectedObjects, uint64_t expectedBytes);
+            uint64_t tableId, uint64_t firstKeyHash, uint64_t lastKeyHash);
     static void recover(Context* context, ServerId serverId,
             uint64_t recoveryId, ServerId crashedServerId,
             uint64_t partitionId,
@@ -62,11 +68,19 @@ class MasterClient {
             const WireFormat::Recover::Replica* replicas,
             uint32_t numReplicas);
     static void receiveMigrationData(Context* context, ServerId serverId,
-            uint64_t tableId, uint64_t firstKeyHash, Segment* segment);
+            Segment* segment, uint64_t tableId, uint64_t firstKeyHash,
+            bool isIndexletData = false,
+            uint64_t dataTableId = 0, uint8_t indexId = 0,
+            const void* key = NULL, uint16_t keyLength = 0);
     static void removeIndexEntry(MasterService* master,
             uint64_t tableId, uint8_t indexId,
             const void* indexKey, KeyLength indexKeyLength,
             uint64_t primaryKeyHash);
+    static void splitAndMigrateIndexlet(Context* context,
+            ServerId currentOwnerId, ServerId newOwnerId,
+            uint64_t tableId, uint8_t indexId,
+            uint64_t currentBackingTableId, uint64_t newBackingTableId,
+            const void* splitKey, uint16_t splitKeyLength);
     static void splitMasterTablet(Context* context, ServerId serverId,
             uint64_t tableId, uint64_t splitKeyHash);
     static void takeTabletOwnership(Context* context, ServerId id,
@@ -75,29 +89,12 @@ class MasterClient {
             uint64_t tableId, uint8_t indexId, uint64_t backingTableId,
             const void *firstKey, uint16_t firstKeyLength,
             const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength);
-    static void dropIndexletOwnership(Context* context, ServerId id,
-            uint64_t tableId, uint8_t indexId, const void *firstKey,
-            uint16_t firstKeyLength, const void *firstNotOwnedKey,
-            uint16_t firstNotOwnedKeyLength);
+    static void txHintFailed(Context* context, uint64_t tableId,
+            uint64_t keyHash, uint64_t leaseId, uint64_t clientTransactionId,
+            uint32_t participantCount, WireFormat::TxParticipant *participants);
 
   private:
     MasterClient();
-};
-
-/**
- * Encapsulates the state of a MasterClient::dropTabletOwnership
- * request, allowing it to execute asynchronously.
- */
-class DropTabletOwnershipRpc : public ServerIdRpcWrapper {
-  public:
-    DropTabletOwnershipRpc(Context* context, ServerId serverId,
-            uint64_t tableId, uint64_t firstKey, uint64_t lastKey);
-    ~DropTabletOwnershipRpc() {}
-    /// \copydoc ServerIdRpcWrapper::waitAndCheckErrors
-    void wait() {waitAndCheckErrors();}
-
-  PRIVATE:
-    DISALLOW_COPY_AND_ASSIGN(DropTabletOwnershipRpc);
 };
 
 /**
@@ -119,6 +116,22 @@ class DropIndexletOwnershipRpc : public ServerIdRpcWrapper {
 };
 
 /**
+ * Encapsulates the state of a MasterClient::dropTabletOwnership
+ * request, allowing it to execute asynchronously.
+ */
+class DropTabletOwnershipRpc : public ServerIdRpcWrapper {
+  public:
+    DropTabletOwnershipRpc(Context* context, ServerId serverId,
+            uint64_t tableId, uint64_t firstKey, uint64_t lastKey);
+    ~DropTabletOwnershipRpc() {}
+    /// \copydoc ServerIdRpcWrapper::waitAndCheckErrors
+    void wait() {waitAndCheckErrors();}
+
+  PRIVATE:
+    DISALLOW_COPY_AND_ASSIGN(DropTabletOwnershipRpc);
+};
+
+/**
  * Encapsulates the state of a MasterClient::getHeadOfLog
  * request, allowing it to execute asynchronously.
  */
@@ -126,7 +139,7 @@ class GetHeadOfLogRpc : public ServerIdRpcWrapper {
   public:
     GetHeadOfLogRpc(Context* context, ServerId serverId);
     ~GetHeadOfLogRpc() {}
-    Log::Position wait();
+    LogPosition wait();
 
   PRIVATE:
     DISALLOW_COPY_AND_ASSIGN(GetHeadOfLogRpc);
@@ -144,7 +157,7 @@ class InsertIndexEntryRpc : public IndexRpcWrapper {
             uint64_t primaryKeyHash);
     ~InsertIndexEntryRpc() {}
     void indexNotFound();
-    void wait() {simpleWait(context->dispatch);}
+    void wait() {simpleWait(context);}
 
   PRIVATE:
     DISALLOW_COPY_AND_ASSIGN(InsertIndexEntryRpc);
@@ -166,14 +179,32 @@ class IsReplicaNeededRpc : public ServerIdRpcWrapper {
 };
 
 /**
+ * Encapsulates the state of a MasterClient::prepForIndexletMigration
+ * request, allowing it to execute asynchronously.
+ */
+class PrepForIndexletMigrationRpc : public ServerIdRpcWrapper {
+  public:
+    PrepForIndexletMigrationRpc(Context* context, ServerId serverId,
+            uint64_t tableId, uint8_t indexId,
+            uint64_t backingTableId,
+            const void* firstKey, uint16_t firstKeyLength,
+            const void* firstNotOwnedKey, uint16_t firstNotOwnedKeyLength);
+    ~PrepForIndexletMigrationRpc() {}
+    /// \copydoc ServerIdRpcWrapper::waitAndCheckErrors
+    void wait() {waitAndCheckErrors();}
+
+  PRIVATE:
+    DISALLOW_COPY_AND_ASSIGN(PrepForIndexletMigrationRpc);
+};
+
+/**
  * Encapsulates the state of a MasterClient::prepForMigration
  * request, allowing it to execute asynchronously.
  */
 class PrepForMigrationRpc : public ServerIdRpcWrapper {
   public:
     PrepForMigrationRpc(Context* context, ServerId serverId,
-            uint64_t tableId, uint64_t firstKeyHash, uint64_t lastKeyHash,
-            uint64_t expectedObjects, uint64_t expectedBytes);
+            uint64_t tableId, uint64_t firstKeyHash, uint64_t lastKeyHash);
     ~PrepForMigrationRpc() {}
     /// \copydoc ServerIdRpcWrapper::waitAndCheckErrors
     void wait() {waitAndCheckErrors();}
@@ -189,7 +220,9 @@ class PrepForMigrationRpc : public ServerIdRpcWrapper {
 class ReceiveMigrationDataRpc : public ServerIdRpcWrapper {
   public:
     ReceiveMigrationDataRpc(Context* context, ServerId serverId,
-            uint64_t tableId, uint64_t firstKey, Segment* segment);
+            Segment* segment, uint64_t tableId, uint64_t firstKey,
+            bool isIndexletData, uint64_t dataTableId, uint8_t indexId,
+            const void* key, uint16_t keyLength);
     ~ReceiveMigrationDataRpc() {}
     /// \copydoc ServerIdRpcWrapper::waitAndCheckErrors
     void wait() {waitAndCheckErrors();}
@@ -229,10 +262,29 @@ class RemoveIndexEntryRpc : public IndexRpcWrapper {
              uint64_t primaryKeyHash);
     ~RemoveIndexEntryRpc() {}
     void indexNotFound();
-    void wait() {simpleWait(context->dispatch);}
+    void wait() {simpleWait(context);}
 
   PRIVATE:
     DISALLOW_COPY_AND_ASSIGN(RemoveIndexEntryRpc);
+};
+
+/**
+ * Encapsulates the state of a MasterClient::splitAndMigrateIndexlet
+ * request, allowing it to execute asynchronously.
+ */
+class SplitAndMigrateIndexletRpc : public ServerIdRpcWrapper {
+  public:
+    SplitAndMigrateIndexletRpc(Context* context,
+            ServerId currentOwnerId, ServerId newOwnerId,
+            uint64_t tableId, uint8_t indexId,
+            uint64_t currentBackingTableId, uint64_t newBackingTableId,
+            const void* splitKey, uint16_t splitKeyLength);
+    ~SplitAndMigrateIndexletRpc() {}
+    /// \copydoc ServerIdRpcWrapper::waitAndCheckErrors
+    void wait() {waitAndCheckErrors();}
+
+  PRIVATE:
+    DISALLOW_COPY_AND_ASSIGN(SplitAndMigrateIndexletRpc);
 };
 
 /**
@@ -283,6 +335,23 @@ class TakeIndexletOwnershipRpc : public ServerIdRpcWrapper {
 
   PRIVATE:
     DISALLOW_COPY_AND_ASSIGN(TakeIndexletOwnershipRpc);
+};
+
+/**
+ * Encapsulates the state of a MasterClient::txHintFailedRpc
+ * request, allowing it to execute asynchronously.
+ */
+class TxHintFailedRpc : public ObjectRpcWrapper {
+  public:
+    TxHintFailedRpc(Context* context, uint64_t tableId, uint64_t keyHash,
+            uint64_t leaseId, uint64_t clientTransactionId,
+            uint32_t participantCount, WireFormat::TxParticipant *participants);
+    ~TxHintFailedRpc() {}
+    /// \copydoc RpcWrapper::docForWait
+    void wait() {simpleWait(context);}
+
+  PRIVATE:
+    DISALLOW_COPY_AND_ASSIGN(TxHintFailedRpc);
 };
 
 } // namespace RAMCloud

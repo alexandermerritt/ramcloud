@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2012 Stanford University
+/* Copyright (c) 2009-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -59,27 +59,10 @@ class GetRecoveryDataRpc : public ServerIdRpcWrapper {
                        uint64_t partitionId,
                        Buffer* responseBuffer);
     ~GetRecoveryDataRpc() {}
-    Segment::Certificate wait();
+    SegmentCertificate wait();
 
   PRIVATE:
     DISALLOW_COPY_AND_ASSIGN(GetRecoveryDataRpc);
-};
-
-/**
- * Encapsulates the state of a BackupClient::quiesce operation,
- * allowing it to execute asynchronously (it has the "Backup" prefix
- * to distinguish it from the CoordinatorClient version of the
- * same call).
- */
-class BackupQuiesceRpc : public ServerIdRpcWrapper {
-  public:
-    BackupQuiesceRpc(Context* context, ServerId backupId);
-    ~BackupQuiesceRpc() {}
-    /// \copydoc ServerIdRpcWrapper::waitAndCheckErrors
-    void wait() {waitAndCheckErrors();}
-
-  PRIVATE:
-    DISALLOW_COPY_AND_ASSIGN(BackupQuiesceRpc);
 };
 
 /**
@@ -207,7 +190,7 @@ class WriteSegmentRpc : public ServerIdRpcWrapper {
                     ServerId masterId,
                     uint64_t segmentId, uint64_t segmentEpoch,
                     const Segment* segment, uint32_t offset, uint32_t length,
-                    const Segment::Certificate* certificate,
+                    const SegmentCertificate* certificate,
                     bool open, bool close, bool primary);
     ~WriteSegmentRpc() {}
     void wait();
@@ -228,14 +211,13 @@ class BackupClient {
             const ServerId* replicationGroupIds);
     static void freeSegment(Context* context, ServerId backupId,
             ServerId masterId, uint64_t segmentId);
-    static Segment::Certificate getRecoveryData(Context* context,
-                                                ServerId backupId,
-                                                uint64_t recoveryId,
-                                                ServerId masterId,
-                                                uint64_t segmentId,
-                                                uint64_t partitionId,
-                                                Buffer* response);
-    static void quiesce(Context* context, ServerId backupId);
+    static SegmentCertificate getRecoveryData(Context* context,
+                                              ServerId backupId,
+                                              uint64_t recoveryId,
+                                              ServerId masterId,
+                                              uint64_t segmentId,
+                                              uint64_t partitionId,
+                                              Buffer* response);
     static void recoveryComplete(Context* context, ServerId backupId,
             ServerId masterId);
     static StartReadingDataRpc::Result startReadingData(Context* context,
@@ -246,7 +228,7 @@ class BackupClient {
     static void writeSegment(Context* context, ServerId backupId,
             ServerId masterId, uint64_t segmentId, uint64_t segmentEpoch,
             const Segment* segment, uint32_t offset, uint32_t length,
-            const Segment::Certificate* certificate,
+            const SegmentCertificate* certificate,
             bool open, bool close, bool primary);
 
   private:

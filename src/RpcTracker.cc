@@ -1,4 +1,4 @@
-/* Copyright (c) 2014 Stanford University
+/* Copyright (c) 2014-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -13,6 +13,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include "RamCloud.h"
 #include "RpcTracker.h"
 
 namespace RAMCloud {
@@ -20,7 +21,8 @@ namespace RAMCloud {
 /**
  * Clean up allocated resources.
  */
-RpcTracker::~RpcTracker() {
+RpcTracker::~RpcTracker()
+{
 }
 
 /**
@@ -30,42 +32,104 @@ RpcTracker::~RpcTracker() {
  *      The id of an Rpc.
  */
 void
-RpcTracker::rpcFinished(uint64_t rpcId) {
-    assert(!rpcs[rpcId % windowSize]);
-    rpcs[rpcId % windowSize] = true;
-    if (firstMissing == rpcId) {
-        firstMissing++;
-        while (rpcs[firstMissing % windowSize] && firstMissing < nextRpcId)
+RpcTracker::rpcFinished(uint64_t rpcId)
+{
+    // Only need to mark receipt if the rpcId is inside window.
+    if (rpcId >= firstMissing && rpcId < firstMissing + windowSize) {
+        rpcs[rpcId & indexMask] = NULL;
+        if (firstMissing == rpcId) {
             firstMissing++;
+            while (!rpcs[firstMissing & indexMask] && firstMissing < nextRpcId)
+                firstMissing++;
+        }
     }
 }
 
 /**
- * Gets a unique RPC id for new linearizable RPC.
+ * Gets a unique RPC id for new Tracked RPC.  This method may block waiting for
+ * the oldest TrackedRpc to complete if it is running too far behind.  This
+ * effectively bounds the number of outstanding requests a client may have.
+ *
+ * \param ptr
+ *      Pointer to TrackedRpc to which we assign a new rpcId.
  *
  * \return
  *      The id for new RPC.
- *      Or 0 if the rpc waiting for response (first Missing) is too far behind.
  */
 uint64_t
-RpcTracker::newRpcId() {
-    if (firstMissing + windowSize == nextRpcId) {
-        return 0;
+RpcTracker::newRpcId(TrackedRpc* ptr)
+{
+    assert(ptr != NULL);
+    while (firstMissing + windowSize <= nextRpcId) {
+        RAMCLOUD_CLOG(NOTICE, "Waiting for response of RPC with id: %ld",
+                      firstMissing);
+        TrackedRpc* oldest = oldestOutstandingRpc();
+        oldest->tryFinish();
     }
-    rpcs[nextRpcId % windowSize] = false;
+    assert(firstMissing + windowSize > nextRpcId);
+    rpcs[nextRpcId & indexMask] = ptr;
     return nextRpcId++;
 }
 
 /**
+ * Gets an atomic block of unique RPC ids.
+ *
+ * Id blocks requested via this method are released atomically by calling
+ * rpcFinished on the first id in the block.
+ *
+ * This method may block waiting for the oldest TrackedRpc to complete if it is
+ * running too far behind.  This effectively bounds the number of outstanding
+ * requests a client may have.
+ *
+ * Used to allocate a blocks of RPC ids for transactions.
+ *
+ * \param ptr
+ *      Pointer to TrackedRpc to which we assign a new block of RPC ids.
+ * \param size
+ *      Number of new RPC ids that should be allocated.
+ * \return
+ *      First RPC id in the block of new RPC ids.
+ */
+uint64_t
+RpcTracker::newRpcIdBlock(TrackedRpc* ptr, size_t size)
+{
+    assert(ptr != NULL);
+    while (firstMissing + windowSize <= nextRpcId) {
+        RAMCLOUD_CLOG(NOTICE, "Waiting for response of RPC with id: %ld",
+                      firstMissing);
+        TrackedRpc* oldest = oldestOutstandingRpc();
+        oldest->tryFinish();
+    }
+    assert(firstMissing + windowSize > nextRpcId);
+    rpcs[nextRpcId & indexMask] = ptr;
+    uint64_t blockRpcId = nextRpcId;
+    nextRpcId += size;
+    return blockRpcId;
+}
+
+/**
  * Gets the current acknowledgment id, which indicates RPCs with id smaller
- * than this number are all received results.
+ * than this number have all received results.
  *
  * \return
  *      The ackId value to be sent with new RPC.
  */
 uint64_t
-RpcTracker::ackId() {
+RpcTracker::ackId()
+{
     return firstMissing - 1;
+}
+
+/**
+ * Return the pointer to the oldest outstanding linearizable RPC.
+ * \return
+ *      Pointer to linearizable RPC wrapper with smallest rpdId.
+ */
+RpcTracker::TrackedRpc*
+RpcTracker::oldestOutstandingRpc()
+{
+    assert(rpcs[firstMissing & indexMask]);
+    return rpcs[firstMissing & indexMask];
 }
 
 } // namespace RAMCloud

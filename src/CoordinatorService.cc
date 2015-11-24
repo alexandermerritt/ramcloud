@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2014 Stanford University
+/* Copyright (c) 2009-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -33,34 +33,35 @@ bool CoordinatorService::forceSynchronousInit = false;
  * Construct a CoordinatorService.
  *
  * \param context
- *      Overall information about the RAMCloud server. A pointer to this
- *      object will be stored at context->coordinatorService.
+ *      Overall information about the RAMCloud server.  The new service
+ *      will be registered in this context.
  * \param deadServerTimeout
  *      Servers are presumed dead if they cannot respond to a ping request
  *      in this many milliseconds.
- * \param startRecoveryManager
- *      True means we should start the thread that manages crash recovery.
- *      False is typically used only during testing.
+ * \param unitTesting
+ *      False (typical usage) means we should start the various manager threads.
+ *      True is used only during testing to not run various background tasks.
  */
 CoordinatorService::CoordinatorService(Context* context,
                                        uint32_t deadServerTimeout,
-                                       bool startRecoveryManager,
-                                       uint32_t maxThreads)
+                                       bool unitTesting,
+                                       bool neverKill)
     : context(context)
     , serverList(context->coordinatorServerList)
     , deadServerTimeout(deadServerTimeout)
     , updateManager(context->externalStorage)
     , tableManager(context, &updateManager)
+    , leaseAuthority(context)
     , runtimeOptions()
     , recoveryManager(context, tableManager, &runtimeOptions)
-    , threadLimit(maxThreads)
     , forceServerDownForTesting(false)
+    , neverKill(neverKill)
     , initFinished(false)
     , backupConfig()
     , masterConfig()
 {
+    context->services[WireFormat::COORDINATOR_SERVICE] = this;
     context->recoveryManager = &recoveryManager;
-    context->coordinatorService = this;
 
     // Invoke the rest of initialization in a separate thread (except during
     // unit tests). This is needed because some of the recovery operations
@@ -70,14 +71,15 @@ CoordinatorService::CoordinatorService(Context* context,
     // Thus we can't perform recovery synchronously here.
 
     if (forceSynchronousInit) {
-        init(this, startRecoveryManager);
+        init(this, unitTesting);
     } else {
-        std::thread(init, this, startRecoveryManager).detach();
+        std::thread(init, this, unitTesting).detach();
     }
 }
 
 CoordinatorService::~CoordinatorService()
 {
+    context->services[WireFormat::COORDINATOR_SERVICE] = NULL;
     recoveryManager.halt();
 }
 
@@ -87,18 +89,19 @@ CoordinatorService::~CoordinatorService()
  * explanation in the constructor).
  * \param service
  *      Coordinator service that is being constructed.
- * \param startRecoveryManager
- *      True means start the thread that handles master recoveries (this
- *      should always be true, except during unit tests)
+ * \param unitTesting
+ *      False means don't start the various background tasks (this should always
+ *      be true, except during unit tests)
  */
 void
 CoordinatorService::init(CoordinatorService* service,
-        bool startRecoveryManager)
+        bool unitTesting)
 {
     // This is the top-level method in a thread, so it must catch all
     // exceptions.
     try {
         // Recover state (and incomplete operations) from external storage.
+        service->leaseAuthority.recover();
         uint64_t lastCompletedUpdate = service->updateManager.init();
         service->serverList->recover(lastCompletedUpdate);
         service->tableManager.recover(lastCompletedUpdate);
@@ -111,13 +114,16 @@ CoordinatorService::init(CoordinatorService* service,
         // for updating).
         service->serverList->startUpdater();
 
-        // When the recovery manager starts up below, it will resume
-        // recovery for crashed nodes; it isn't safe to do that until
-        // after the server list and table manager have recovered (e.g.
-        // it will need accurate information about which tables are stored on
-        // a crashed server).
-        if (startRecoveryManager)
+        if (!unitTesting) {
+            service->leaseAuthority.startUpdaters();
+            // When the recovery manager starts up below, it will resume
+            // recovery for crashed nodes; it isn't safe to do that until
+            // after the server list and table manager have recovered (e.g.
+            // it will need accurate information about which tables are stored
+            // on a crashed server).
             service->recoveryManager.start();
+        }
+
 
         service->initFinished = true;
     } catch (std::exception& e) {
@@ -139,21 +145,30 @@ CoordinatorService::dispatch(WireFormat::Opcode opcode,
                 "coordinator service not yet initialized");
     }
     switch (opcode) {
-        case WireFormat::CreateTable::opcode:
-            callHandler<WireFormat::CreateTable, CoordinatorService,
-                        &CoordinatorService::createTable>(rpc);
-            break;
-        case WireFormat::DropTable::opcode:
-            callHandler<WireFormat::DropTable, CoordinatorService,
-                        &CoordinatorService::dropTable>(rpc);
+        case WireFormat::CoordSplitAndMigrateIndexlet::opcode:
+            callHandler<WireFormat::CoordSplitAndMigrateIndexlet,
+                        CoordinatorService,
+                        &CoordinatorService::coordSplitAndMigrateIndexlet>(rpc);
             break;
         case WireFormat::CreateIndex::opcode:
             callHandler<WireFormat::CreateIndex, CoordinatorService,
                         &CoordinatorService::createIndex>(rpc);
             break;
+        case WireFormat::CreateTable::opcode:
+            callHandler<WireFormat::CreateTable, CoordinatorService,
+                        &CoordinatorService::createTable>(rpc);
+            break;
         case WireFormat::DropIndex::opcode:
             callHandler<WireFormat::DropIndex, CoordinatorService,
                         &CoordinatorService::dropIndex>(rpc);
+            break;
+        case WireFormat::DropTable::opcode:
+            callHandler<WireFormat::DropTable, CoordinatorService,
+                        &CoordinatorService::dropTable>(rpc);
+            break;
+        case WireFormat::EnlistServer::opcode:
+            callHandler<WireFormat::EnlistServer, CoordinatorService,
+                        &CoordinatorService::enlistServer>(rpc);
             break;
         case WireFormat::GetRuntimeOption::opcode:
             callHandler<WireFormat::GetRuntimeOption, CoordinatorService,
@@ -163,13 +178,13 @@ CoordinatorService::dispatch(WireFormat::Opcode opcode,
             callHandler<WireFormat::GetTableId, CoordinatorService,
                         &CoordinatorService::getTableId>(rpc);
             break;
-        case WireFormat::EnlistServer::opcode:
-            callHandler<WireFormat::EnlistServer, CoordinatorService,
-                        &CoordinatorService::enlistServer>(rpc);
-            break;
         case WireFormat::GetBackupConfig::opcode:
             callHandler<WireFormat::GetBackupConfig, CoordinatorService,
                         &CoordinatorService::getBackupConfig>(rpc);
+            break;
+        case WireFormat::GetLeaseInfo::opcode:
+            callHandler<WireFormat::GetLeaseInfo, CoordinatorService,
+                        &CoordinatorService::getLeaseInfo>(rpc);
             break;
         case WireFormat::GetMasterConfig::opcode:
             callHandler<WireFormat::GetMasterConfig, CoordinatorService,
@@ -187,25 +202,29 @@ CoordinatorService::dispatch(WireFormat::Opcode opcode,
             callHandler<WireFormat::HintServerCrashed, CoordinatorService,
                         &CoordinatorService::hintServerCrashed>(rpc);
             break;
-        case WireFormat::RecoveryMasterFinished::opcode:
-            callHandler<WireFormat::RecoveryMasterFinished, CoordinatorService,
-                        &CoordinatorService::recoveryMasterFinished>(rpc);
-            break;
-        case WireFormat::BackupQuiesce::opcode:
-            callHandler<WireFormat::BackupQuiesce, CoordinatorService,
-                        &CoordinatorService::quiesce>(rpc);
-            break;
-        case WireFormat::SetRuntimeOption::opcode:
-            callHandler<WireFormat::SetRuntimeOption, CoordinatorService,
-                        &CoordinatorService::setRuntimeOption>(rpc);
-            break;
         case WireFormat::ReassignTabletOwnership::opcode:
             callHandler<WireFormat::ReassignTabletOwnership, CoordinatorService,
                         &CoordinatorService::reassignTabletOwnership>(rpc);
             break;
+        case WireFormat::RecoveryMasterFinished::opcode:
+            callHandler<WireFormat::RecoveryMasterFinished, CoordinatorService,
+                        &CoordinatorService::recoveryMasterFinished>(rpc);
+            break;
+        case WireFormat::RenewLease::opcode:
+            callHandler<WireFormat::RenewLease, CoordinatorService,
+                        &CoordinatorService::renewLease>(rpc);
+            break;
+        case WireFormat::ServerControlAll::opcode:
+            callHandler<WireFormat::ServerControlAll, CoordinatorService,
+                        &CoordinatorService::serverControlAll>(rpc);
+            break;
         case WireFormat::SetMasterRecoveryInfo::opcode:
             callHandler<WireFormat::SetMasterRecoveryInfo, CoordinatorService,
                         &CoordinatorService::setMasterRecoveryInfo>(rpc);
+            break;
+        case WireFormat::SetRuntimeOption::opcode:
+            callHandler<WireFormat::SetRuntimeOption, CoordinatorService,
+                        &CoordinatorService::setRuntimeOption>(rpc);
             break;
         case WireFormat::SplitTablet::opcode:
             callHandler<WireFormat::SplitTablet, CoordinatorService,
@@ -214,10 +233,6 @@ CoordinatorService::dispatch(WireFormat::Opcode opcode,
         case WireFormat::VerifyMembership::opcode:
             callHandler<WireFormat::VerifyMembership, CoordinatorService,
                         &CoordinatorService::verifyMembership>(rpc);
-            break;
-        case WireFormat::ServerControlAll::opcode:
-            callHandler<WireFormat::ServerControlAll, CoordinatorService,
-                        &CoordinatorService::serverControlAll>(rpc);
             break;
         default:
             throw UnimplementedRequestError(HERE);
@@ -233,14 +248,54 @@ CoordinatorService::getRuntimeOptionsFromCoordinator()
     return &runtimeOptions;
 }
 
+/*
+ * Top-level server method to handle the COORD_SPLIT_AND_MIGRATE_INDEXLET
+ * request.
+ * \copydetails Service::ping
+ */
+void
+CoordinatorService::coordSplitAndMigrateIndexlet(
+        const WireFormat::CoordSplitAndMigrateIndexlet::Request* reqHdr,
+        WireFormat::CoordSplitAndMigrateIndexlet::Response* respHdr,
+        Rpc* rpc)
+{
+    const void* splitKey = rpc->requestPayload->getRange(
+            sizeof(*reqHdr), reqHdr->splitKeyLength);
+
+    if (splitKey == NULL) {
+        respHdr->common.status = STATUS_REQUEST_FORMAT_ERROR;
+        rpc->sendReply();
+        return;
+    }
+
+    tableManager.coordSplitAndMigrateIndexlet(
+            ServerId(reqHdr->newOwnerId), reqHdr->tableId, reqHdr->indexId,
+            splitKey, reqHdr->splitKeyLength);
+}
+
+/**
+ * Top-level server method to handle the CREATE_INDEX request.
+ * \copydetails Service::ping
+ */
+void
+CoordinatorService::createIndex(
+        const WireFormat::CreateIndex::Request* reqHdr,
+        WireFormat::CreateIndex::Response* respHdr,
+        Rpc* rpc)
+{
+    tableManager.createIndex(reqHdr->tableId, reqHdr->indexId,
+            reqHdr->indexType, reqHdr->numIndexlets);
+}
+
 /**
  * Top-level server method to handle the CREATE_TABLE request.
  * \copydetails Service::ping
  */
 void
-CoordinatorService::createTable(const WireFormat::CreateTable::Request* reqHdr,
-                                WireFormat::CreateTable::Response* respHdr,
-                                Rpc* rpc)
+CoordinatorService::createTable(
+        const WireFormat::CreateTable::Request* reqHdr,
+        WireFormat::CreateTable::Response* respHdr,
+        Rpc* rpc)
 {
     if (serverList->masterCount() == 0) {
         respHdr->common.status = STATUS_RETRY;
@@ -255,120 +310,31 @@ CoordinatorService::createTable(const WireFormat::CreateTable::Request* reqHdr,
 }
 
 /**
- * Top-level server method to handle the DROP_TABLE request.
- * \copydetails Service::ping
- */
-void
-CoordinatorService::dropTable(const WireFormat::DropTable::Request* reqHdr,
-                              WireFormat::DropTable::Response* respHdr,
-                              Rpc* rpc)
-{
-    const char* name = getString(rpc->requestPayload, sizeof(*reqHdr),
-                                 reqHdr->nameLength);
-    tableManager.dropTable(name);
-}
-
-/**
- * Top-level server method to handle the CREATE_INDEX request.
- * \copydetails Service::ping
- */
-void
-CoordinatorService::createIndex(const WireFormat::CreateIndex::Request* reqHdr,
-                                WireFormat::CreateIndex::Response* respHdr,
-                                Rpc* rpc)
-{
-    tableManager.createIndex(reqHdr->tableId, reqHdr->indexId,
-            reqHdr->indexType, reqHdr->numIndexlets);
-}
-
-/**
  * Top-level server method to handle the DROP_INDEX request.
  * \copydetails Service::ping
  */
 void
-CoordinatorService::dropIndex(const WireFormat::DropIndex::Request* reqHdr,
-                              WireFormat::DropIndex::Response* respHdr,
-                              Rpc* rpc)
+CoordinatorService::dropIndex(
+        const WireFormat::DropIndex::Request* reqHdr,
+        WireFormat::DropIndex::Response* respHdr,
+        Rpc* rpc)
 {
     tableManager.dropIndex(reqHdr->tableId, reqHdr->indexId);
 }
 
 /**
- * Top-level server method to handle the SPLIT_TABLET request.
+ * Top-level server method to handle the DROP_TABLE request.
  * \copydetails Service::ping
  */
 void
-CoordinatorService::splitTablet(const WireFormat::SplitTablet::Request* reqHdr,
-                                WireFormat::SplitTablet::Response* respHdr,
-                                Rpc* rpc)
-{
-    // Check that the tablet with the described key ranges exists.
-    // If the tablet exists, adjust its lastKeyHash so it becomes the tablet
-    // for the first part after the split and also copy the tablet and use
-    // the copy for the second part after the split.
-    const char* name = getString(rpc->requestPayload, sizeof(*reqHdr),
-                                 reqHdr->nameLength);
-    try {
-        tableManager.splitTablet(
-                name, reqHdr->splitKeyHash);
-        LOG(NOTICE,
-            "In table '%s' I split the tablet at key %lu",
-            name, reqHdr->splitKeyHash);
-    } catch (const TableManager::NoSuchTablet& e) {
-        respHdr->common.status = STATUS_TABLET_DOESNT_EXIST;
-        return;
-    } catch (const TableManager::BadSplit& e) {
-        respHdr->common.status = STATUS_REQUEST_FORMAT_ERROR;
-        return;
-    } catch (TableManager::NoSuchTable& e) {
-        respHdr->common.status = STATUS_TABLE_DOESNT_EXIST;
-        return;
-    }
-}
-
-/**
- * Gets the value of a runtime option field that's been previously set
- * using CoordinatorClient::setRuntimeOption().
- * \copydetails Service::ping
- */
-void
-CoordinatorService::getRuntimeOption(
-    const WireFormat::GetRuntimeOption::Request* reqHdr,
-    WireFormat::GetRuntimeOption::Response* respHdr,
-    Rpc* rpc)
-{
-    const char* option = getString(rpc->requestPayload, sizeof(*reqHdr),
-                                   reqHdr->optionLength);
-    try {
-        std::string value = runtimeOptions.get(option);
-        respHdr->valueLength = downCast<uint32_t>(value.size() + 1);
-        rpc->replyPayload->append(value.c_str(), respHdr->valueLength);
-    } catch (const std::out_of_range& e) {
-        respHdr->common.status = STATUS_OBJECT_DOESNT_EXIST;
-        return;
-    }
-}
-
-/**
- * Top-level server method to handle the GET_TABLE_ID request.
- * \copydetails Service::ping
- */
-void
-CoordinatorService::getTableId(
-    const WireFormat::GetTableId::Request* reqHdr,
-    WireFormat::GetTableId::Response* respHdr,
-    Rpc* rpc)
+CoordinatorService::dropTable(
+        const WireFormat::DropTable::Request* reqHdr,
+        WireFormat::DropTable::Response* respHdr,
+        Rpc* rpc)
 {
     const char* name = getString(rpc->requestPayload, sizeof(*reqHdr),
                                  reqHdr->nameLength);
-
-    try {
-        uint64_t tableId = tableManager.getTableId(name);
-        respHdr->tableId = tableId;
-    } catch (TableManager::NoSuchTable& e) {
-        respHdr->common.status = STATUS_TABLE_DOESNT_EXIST;
-        return;
-    }
+    tableManager.dropTable(name);
 }
 
 /**
@@ -377,9 +343,9 @@ CoordinatorService::getTableId(
  */
 void
 CoordinatorService::enlistServer(
-    const WireFormat::EnlistServer::Request* reqHdr,
-    WireFormat::EnlistServer::Response* respHdr,
-    Rpc* rpc)
+        const WireFormat::EnlistServer::Request* reqHdr,
+        WireFormat::EnlistServer::Response* respHdr,
+        Rpc* rpc)
 {
     ServerId replacesId = ServerId(reqHdr->replacesId);
     ServiceMask serviceMask = ServiceMask::deserialize(reqHdr->serviceMask);
@@ -423,6 +389,20 @@ CoordinatorService::getBackupConfig(
 }
 
 /**
+ * Handle the GET_LEASE_INFO RPC.
+ *
+ * \copydetails Service::ping
+ */
+void
+CoordinatorService::getLeaseInfo(
+    const WireFormat::GetLeaseInfo::Request* reqHdr,
+    WireFormat::GetLeaseInfo::Response* respHdr,
+    Rpc* rpc)
+{
+    respHdr->lease = leaseAuthority.getLeaseInfo(reqHdr->leaseId);
+}
+
+/**
  * Handle the GET_MASTER_CONFIG RPC.
  * \copydetails Service::ping
  */
@@ -439,14 +419,37 @@ CoordinatorService::getMasterConfig(
 }
 
 /**
+ * Gets the value of a runtime option field that's been previously set
+ * using CoordinatorClient::setRuntimeOption().
+ * \copydetails Service::ping
+ */
+void
+CoordinatorService::getRuntimeOption(
+        const WireFormat::GetRuntimeOption::Request* reqHdr,
+        WireFormat::GetRuntimeOption::Response* respHdr,
+        Rpc* rpc)
+{
+    const char* option = getString(rpc->requestPayload, sizeof(*reqHdr),
+                                   reqHdr->optionLength);
+    try {
+        std::string value = runtimeOptions.get(option);
+        respHdr->valueLength = downCast<uint32_t>(value.size() + 1);
+        rpc->replyPayload->append(value.c_str(), respHdr->valueLength);
+    } catch (const std::out_of_range& e) {
+        respHdr->common.status = STATUS_OBJECT_DOESNT_EXIST;
+        return;
+    }
+}
+
+/**
  * Handle the GET_SERVER_LIST RPC.
  * \copydetails Service::ping
  */
 void
 CoordinatorService::getServerList(
-    const WireFormat::GetServerList::Request* reqHdr,
-    WireFormat::GetServerList::Response* respHdr,
-    Rpc* rpc)
+        const WireFormat::GetServerList::Request* reqHdr,
+        WireFormat::GetServerList::Response* respHdr,
+        Rpc* rpc)
 {
     ServiceMask serviceMask = ServiceMask::deserialize(reqHdr->serviceMask);
 
@@ -463,14 +466,36 @@ CoordinatorService::getServerList(
  */
 void
 CoordinatorService::getTableConfig(
-    const WireFormat::GetTableConfig::Request* reqHdr,
-    WireFormat::GetTableConfig::Response* respHdr,
-    Rpc* rpc)
+        const WireFormat::GetTableConfig::Request* reqHdr,
+        WireFormat::GetTableConfig::Response* respHdr,
+        Rpc* rpc)
 {
     ProtoBuf::TableConfig tableConfig;
     tableManager.serializeTableConfig(&tableConfig, reqHdr->tableId);
     respHdr->tableConfigLength = serializeToResponse(rpc->replyPayload,
                                                      &tableConfig);
+}
+
+/**
+ * Top-level server method to handle the GET_TABLE_ID request.
+ * \copydetails Service::ping
+ */
+void
+CoordinatorService::getTableId(
+        const WireFormat::GetTableId::Request* reqHdr,
+        WireFormat::GetTableId::Response* respHdr,
+        Rpc* rpc)
+{
+    const char* name = getString(rpc->requestPayload, sizeof(*reqHdr),
+                                 reqHdr->nameLength);
+
+    try {
+        uint64_t tableId = tableManager.getTableId(name);
+        respHdr->tableId = tableId;
+    } catch (TableManager::NoSuchTable& e) {
+        respHdr->common.status = STATUS_TABLE_DOESNT_EXIST;
+        return;
+    }
 }
 
 /**
@@ -506,58 +531,15 @@ CoordinatorService::hintServerCrashed(
 }
 
 /**
- * Handle the TABLETS_RECOVERED RPC.
- * \copydetails Service::ping
- */
-void
-CoordinatorService::recoveryMasterFinished(
-    const WireFormat::RecoveryMasterFinished::Request* reqHdr,
-    WireFormat::RecoveryMasterFinished::Response* respHdr,
-    Rpc* rpc)
-{
-    ProtoBuf::RecoveryPartition recoveryPartition;
-    ProtoBuf::parseFromRequest(rpc->requestPayload,
-                               sizeof32(*reqHdr),
-                               reqHdr->tabletsLength, &recoveryPartition);
-
-    ServerId serverId = ServerId(reqHdr->recoveryMasterId);
-    respHdr->cancelRecovery =
-        recoveryManager.recoveryMasterFinished(reqHdr->recoveryId,
-                                               serverId,
-                                               recoveryPartition,
-                                               reqHdr->successful);
-}
-
-/**
- * Have all backups flush their dirty segments to storage.
- * \copydetails Service::ping
- */
-void
-CoordinatorService::quiesce(const WireFormat::BackupQuiesce::Request* reqHdr,
-                            WireFormat::BackupQuiesce::Response* respHdr,
-                            Rpc* rpc)
-{
-    for (size_t i = 0; i < serverList->size(); i++) {
-        try {
-            if ((*serverList)[i].isBackup()) {
-                BackupClient::quiesce(context, (*serverList)[i].serverId);
-            }
-        } catch (ServerListException& e) {
-            // Do nothing for the server that doesn't exist. Continue.
-        }
-    }
-}
-
-/**
  * Handle the REASSIGN_TABLET_OWNER RPC.
  *
  * \copydetails Service::ping
  */
 void
 CoordinatorService::reassignTabletOwnership(
-    const WireFormat::ReassignTabletOwnership::Request* reqHdr,
-    WireFormat::ReassignTabletOwnership::Response* respHdr,
-    Rpc* rpc)
+        const WireFormat::ReassignTabletOwnership::Request* reqHdr,
+        WireFormat::ReassignTabletOwnership::Response* respHdr,
+        Rpc* rpc)
 {
     ServerId newOwner(reqHdr->newOwnerId);
     uint64_t tableId = reqHdr->tableId;
@@ -586,80 +568,40 @@ CoordinatorService::reassignTabletOwnership(
 }
 
 /**
- * Sets a runtime option field on the coordinator to the indicated value.
- * See CoordinatorClient::setRuntimeOption() for details.
- *
+ * Handle the TABLETS_RECOVERED RPC.
  * \copydetails Service::ping
  */
 void
-CoordinatorService::setRuntimeOption(
-    const WireFormat::SetRuntimeOption::Request* reqHdr,
-    WireFormat::SetRuntimeOption::Response* respHdr,
-    Rpc* rpc)
+CoordinatorService::recoveryMasterFinished(
+        const WireFormat::RecoveryMasterFinished::Request* reqHdr,
+        WireFormat::RecoveryMasterFinished::Response* respHdr,
+        Rpc* rpc)
 {
-    const char* option = getString(rpc->requestPayload, sizeof(*reqHdr),
-                                   reqHdr->optionLength);
-    const char* value = getString(rpc->requestPayload,
-                                  sizeof32(*reqHdr) + reqHdr->optionLength,
-                                  reqHdr->valueLength);
-    try {
-        runtimeOptions.set(option, value);
-    } catch (const std::out_of_range& e) {
-        respHdr->common.status = STATUS_OBJECT_DOESNT_EXIST;
-    }
-}
-
-/**
- * Updates the master recovery info for a particular server. This metadata
- * is stored in the server list until a master crashes at which point it is
- * used in the recovery of the master. Currently, masters store log metadata
- * there needed to invalidate replicas which might have become stale due to
- * backup crashes. Only the master recovery portion of the coordinator needs
- * to understand the contents.
- *
- * \copydetails Service::ping
- */
-void
-CoordinatorService::setMasterRecoveryInfo(
-    const WireFormat::SetMasterRecoveryInfo::Request* reqHdr,
-    WireFormat::SetMasterRecoveryInfo::Response* respHdr,
-    Rpc* rpc)
-{
-    ServerId serverId(reqHdr->serverId);
-    ProtoBuf::MasterRecoveryInfo recoveryInfo;
+    ProtoBuf::RecoveryPartition recoveryPartition;
     ProtoBuf::parseFromRequest(rpc->requestPayload,
                                sizeof32(*reqHdr),
-                               reqHdr->infoLength, &recoveryInfo);
+                               reqHdr->tabletsLength, &recoveryPartition);
 
-    LOG(DEBUG, "setMasterRecoveryInfo for server %s to %s",
-        serverId.toString().c_str(), recoveryInfo.ShortDebugString().c_str());
-
-    if (!serverList->setMasterRecoveryInfo(serverId, &recoveryInfo)) {
-        LOG(WARNING, "setMasterRecoveryInfo server doesn't exist: %s",
-            serverId.toString().c_str());
-        respHdr->common.status = STATUS_SERVER_NOT_UP;
-        return;
-    }
+    ServerId serverId = ServerId(reqHdr->recoveryMasterId);
+    respHdr->cancelRecovery =
+        recoveryManager.recoveryMasterFinished(reqHdr->recoveryId,
+                                               serverId,
+                                               recoveryPartition,
+                                               reqHdr->successful);
 }
 
 /**
- * Check to see whether a given server is still considered an active member
- * of the cluster; if not, return STATUS_CALLER_NOT_IN_CLUSTER status.
+ * Handle the RENEW_LEASE RPC.
  *
  * \copydetails Service::ping
  */
 void
-CoordinatorService::verifyMembership(
-    const WireFormat::VerifyMembership::Request* reqHdr,
-    WireFormat::VerifyMembership::Response* respHdr,
+CoordinatorService::renewLease(
+    const WireFormat::RenewLease::Request* reqHdr,
+    WireFormat::RenewLease::Response* respHdr,
     Rpc* rpc)
 {
-    ServerId serverId(reqHdr->serverId);
-    if (!serverList->isUp(serverId)) {
-        respHdr->common.status = STATUS_CALLER_NOT_IN_CLUSTER;
-        LOG(WARNING, "Membership verification failed for %s",
-            serverList->toString(serverId).c_str());
-    }
+    respHdr->lease = leaseAuthority.renewLease(reqHdr->leaseId);
 }
 
 /**
@@ -669,16 +611,16 @@ CoordinatorService::verifyMembership(
  */
 void
 CoordinatorService::serverControlAll(
-    const WireFormat::ServerControlAll::Request* reqHdr,
-    WireFormat::ServerControlAll::Response* respHdr,
-    Rpc* rpc)
+        const WireFormat::ServerControlAll::Request* reqHdr,
+        WireFormat::ServerControlAll::Response* respHdr,
+        Rpc* rpc)
 {
     respHdr->serverCount = 0;
     respHdr->respCount = 0;
     respHdr->totalRespLength = 0;
     uint32_t reqOffset = sizeof32(*reqHdr);
     const void* inputData = rpc->requestPayload->getRange(reqOffset,
-                                                          reqHdr->inputLength);
+            reqHdr->inputLength);   // inputData may be NULL.
 
     std::list<ServerControlRpcContainer> rpcs;
     ServerId nextServerId;
@@ -702,6 +644,120 @@ CoordinatorService::serverControlAll(
         }
     }
     respHdr->common.status = STATUS_OK;
+}
+
+/**
+ * Updates the master recovery info for a particular server. This metadata
+ * is stored in the server list until a master crashes at which point it is
+ * used in the recovery of the master. Currently, masters store log metadata
+ * there needed to invalidate replicas which might have become stale due to
+ * backup crashes. Only the master recovery portion of the coordinator needs
+ * to understand the contents.
+ *
+ * \copydetails Service::ping
+ */
+void
+CoordinatorService::setMasterRecoveryInfo(
+        const WireFormat::SetMasterRecoveryInfo::Request* reqHdr,
+        WireFormat::SetMasterRecoveryInfo::Response* respHdr,
+        Rpc* rpc)
+{
+    ServerId serverId(reqHdr->serverId);
+    ProtoBuf::MasterRecoveryInfo recoveryInfo;
+    ProtoBuf::parseFromRequest(rpc->requestPayload,
+                               sizeof32(*reqHdr),
+                               reqHdr->infoLength, &recoveryInfo);
+
+    LOG(DEBUG, "setMasterRecoveryInfo for server %s to %s",
+        serverId.toString().c_str(), recoveryInfo.ShortDebugString().c_str());
+
+    if (!serverList->setMasterRecoveryInfo(serverId, &recoveryInfo)) {
+        LOG(WARNING, "setMasterRecoveryInfo server doesn't exist: %s",
+            serverId.toString().c_str());
+        respHdr->common.status = STATUS_SERVER_NOT_UP;
+        return;
+    }
+}
+
+/**
+ * Sets a runtime option field on the coordinator to the indicated value.
+ * See CoordinatorClient::setRuntimeOption() for details.
+ *
+ * \copydetails Service::ping
+ */
+void
+CoordinatorService::setRuntimeOption(
+        const WireFormat::SetRuntimeOption::Request* reqHdr,
+        WireFormat::SetRuntimeOption::Response* respHdr,
+        Rpc* rpc)
+{
+    const char* option = getString(rpc->requestPayload, sizeof(*reqHdr),
+                                   reqHdr->optionLength);
+    const char* value = getString(rpc->requestPayload,
+                                  sizeof32(*reqHdr) + reqHdr->optionLength,
+                                  reqHdr->valueLength);
+    try {
+        runtimeOptions.set(option, value);
+    } catch (const std::out_of_range& e) {
+        respHdr->common.status = STATUS_OBJECT_DOESNT_EXIST;
+    }
+}
+
+/**
+ * Top-level server method to handle the SPLIT_TABLET request.
+ * \copydetails Service::ping
+ */
+void
+CoordinatorService::splitTablet(
+        const WireFormat::SplitTablet::Request* reqHdr,
+        WireFormat::SplitTablet::Response* respHdr,
+        Rpc* rpc)
+{
+    // Check that the tablet with the described key ranges exists.
+    // If the tablet exists, adjust its lastKeyHash so it becomes the tablet
+    // for the first part after the split and also copy the tablet and use
+    // the copy for the second part after the split.
+    const char* name = getString(rpc->requestPayload, sizeof(*reqHdr),
+                                 reqHdr->nameLength);
+    try {
+        tableManager.splitTablet(
+                name, reqHdr->splitKeyHash);
+        LOG(NOTICE,
+            "In table '%s' I split the tablet at key %lu",
+            name, reqHdr->splitKeyHash);
+    } catch (const TableManager::NoSuchTablet& e) {
+        respHdr->common.status = STATUS_TABLET_DOESNT_EXIST;
+        return;
+    } catch (const TableManager::BadSplit& e) {
+        respHdr->common.status = STATUS_REQUEST_FORMAT_ERROR;
+        return;
+    } catch (TableManager::NoSuchTable& e) {
+        respHdr->common.status = STATUS_TABLE_DOESNT_EXIST;
+        return;
+    }
+}
+
+/**
+ * Check to see whether a given server is still considered an active member
+ * of the cluster; if not, return STATUS_CALLER_NOT_IN_CLUSTER status.
+ *
+ * \copydetails Service::ping
+ */
+void
+CoordinatorService::verifyMembership(
+        const WireFormat::VerifyMembership::Request* reqHdr,
+        WireFormat::VerifyMembership::Response* respHdr,
+        Rpc* rpc)
+{
+    ServerId serverId(reqHdr->serverId);
+    if (!serverList->isUp(serverId)) {
+        respHdr->common.status = STATUS_CALLER_NOT_IN_CLUSTER;
+        LOG(WARNING, "Membership verification failed for %s",
+            serverList->toString(serverId).c_str());
+    } else {
+        LOG(NOTICE, "Membership verification succeeded for %s",
+            serverList->toString(serverId).c_str());
+    }
 }
 
 /**
@@ -732,7 +788,7 @@ CoordinatorService::checkServerControlRpcs(
             continue;
         }
 
-        // Rule 2: Try to wait on the rpc.  If the server responded, we can
+        // Rule 2: Try to wait on the rpc. If the server responded, we can
         // process the rpc.
         if (controlRpc->rpc.waitRaw()) {
             // if the response RPC fits in the response, append the response.
@@ -767,6 +823,8 @@ CoordinatorService::verifyServerFailure(ServerId serverId) {
     // Skip the real ping if this is from a unit test
     if (forceServerDownForTesting)
         return true;
+    if (neverKill)
+        return false;
 
     const string& serviceLocator = serverList->getLocator(serverId);
     PingRpc pingRpc(context, serverId, ServerId());

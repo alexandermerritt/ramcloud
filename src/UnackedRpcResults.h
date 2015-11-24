@@ -1,4 +1,4 @@
-/* Copyright (c) 2014 Stanford University
+/* Copyright (c) 2014-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -17,8 +17,11 @@
 #define RAMCLOUD_UNACKEDRPCRESULTS_H
 
 #include <unordered_map>
+#include "AbstractLog.h"
 #include "Common.h"
+#include "ClientLeaseValidator.h"
 #include "SpinLock.h"
+#include "WorkerTimer.h"
 
 namespace RAMCloud {
 
@@ -32,33 +35,34 @@ namespace RAMCloud {
  */
 class UnackedRpcResults {
   PUBLIC:
-    UnackedRpcResults() : clients(20), mutex(), default_rpclist_size(5) {}
+    explicit UnackedRpcResults(Context* context,
+                               AbstractLog::ReferenceFreer* freer,
+                               ClientLeaseValidator* leaseValidator);
     ~UnackedRpcResults();
-
-    void addClient(uint64_t clientId);
-    bool checkDuplicate(uint64_t clientId,
+    void startCleaner();
+    void resetFreer(AbstractLog::ReferenceFreer* freer);
+    bool checkDuplicate(WireFormat::ClientLease clientLease,
                         uint64_t rpcId,
                         uint64_t ackId,
                         void** result);
     bool shouldRecover(uint64_t clientId, uint64_t rpcId, uint64_t ackId);
-    void recordCompletion(uint64_t clientId, uint64_t rpcId, void* result);
+    void recordCompletion(uint64_t clientId,
+                             uint64_t rpcId,
+                             void* result,
+                             bool ignoreIfAcked = false);
+    void recoverRecord(uint64_t clientId,
+                         uint64_t rpcId,
+                         uint64_t ackId,
+                         void* result);
+    void resetRecord(uint64_t clientId,
+                     uint64_t rpcId);
     bool isRpcAcked(uint64_t clientId, uint64_t rpcId);
-
-    /// Thrown if already acknowledged rpcId is checked in checkDuplicate().
-    struct StaleRpc : public Exception {
-        explicit StaleRpc(const CodeLocation& where) : Exception(where) {}
-    };
-
-    /// Thrown if checkDuplicate finds that it doesn't have enough information
-    /// to decide whether the RPC already has been executed. (eg. Client forgot
-    ///  to register, or the information is thrown away due to a timeout.)
-    struct NoClientInfo : public Exception {
-        explicit NoClientInfo(const CodeLocation& where) : Exception(where) {}
-    };
 
   PRIVATE:
     void resizeRpcList(uint64_t clientId, int size);
     void cleanByTimeout();
+    /// Used only for testing.
+    bool hasRecord(uint64_t clientId, uint64_t rpcId);
 
     /**
      * Holds info about outstanding RPCs, which is needed to avoid re-doing
@@ -74,15 +78,42 @@ class UnackedRpcResults {
         uint64_t id;
 
         /**
-         * Pointer to the result of the RPC in log-structured memory.
+         * Log reference to the RpcResult log entry in log-structured memory.
          * This value may be NULL to indicate the RPC is still in progress.
          */
         void* result;
     };
 
     /**
-     * Stores unacknowledged rpc's id and pointer to result from a client
-     * with some additional useful information for performance.
+     * The Cleaner periodically wakes up to clean up records of clients with
+     * expired leases in unackedRpcResults.
+     * Cleaner blocks the access to unackedRpcResults, so we limit the number
+     * of clients we clean each time.
+     */
+    class Cleaner : public WorkerTimer {
+      public:
+        explicit Cleaner(UnackedRpcResults* unackedRpcResults);
+        virtual void handleTimerEvent();
+
+        /// The pointer to unackedRpcResults which will be cleaned.
+        UnackedRpcResults* unackedRpcResults;
+
+        /// Starting point of next round of cleaning.
+        uint64_t nextClientToCheck;
+
+        /// The maximum number of clients we check for liveness.
+        static const int maxIterPerPeriod = 1000;
+
+        /// The maximum number of clients to be quarries to coordinator
+        /// for the liveness of lease. This parameter is currently not used.
+        static const uint32_t maxCheckPerPeriod = 100;
+      private:
+        DISALLOW_COPY_AND_ASSIGN(Cleaner);
+    };
+
+    /**
+     * Each instance of this class stores information about unacknowledged RPCs
+     * from a single client, which is determined by the client id.
      */
     class Client {
       PUBLIC:
@@ -94,18 +125,20 @@ class UnackedRpcResults {
          */
         explicit Client(int size) : maxRpcId(0),
                                     maxAckId(0),
-                                    lastUpdateTime(0),
+                                    leaseExpiration(),
+                                    numRpcsInProgress(0),
                                     rpcs(new UnackedRpc[size]()),
                                     len(size) {
         }
         ~Client() {
-            delete rpcs;
+            delete[] rpcs;
         }
 
         bool hasRecord(uint64_t rpcId);
         void* result(uint64_t rpcId);
         void recordNewRpc(uint64_t rpcId);
         void updateResult(uint64_t rpcId, void* result);
+        void processAck(uint64_t ackId, AbstractLog::ReferenceFreer* freer);
 
         /**
          * Keeps the largest RpcId from the client seen in this master.
@@ -114,17 +147,29 @@ class UnackedRpcResults {
         uint64_t maxRpcId;
 
         /**
-         * The largest ack number received from this client.
-         * We do not need to retain information for RPCs with rpcId <= maxAckId.
-         */
+         * Largest RpcId for which the client has acknowledged receiving
+         * the result. We do not need to retain information for
+         * RPCs with rpcId <= maxAckId.
+        */
         uint64_t maxAckId;
 
         /**
-         * Used for cleaning inactive client's data on timeout.
+         * A cluster clock value giving a hint about when the client's
+         * lease expires (it definitely will not expire before this time,
+         * but the lease may have been extended since this value was written).
+         * Used in Cleaner for GC.
          */
-        time_t lastUpdateTime;
+        ClusterTime leaseExpiration;
 
-      PRIVATE:
+        /**
+         * The count for rpcIds in stage between checkDuplicate and
+         * recordCompletion (aka. in Progress).
+         * The count is used while cleanup to prevent removing client
+         * with rpcs in progress.
+         */
+        int numRpcsInProgress;
+
+      //PRIVATE:
         void resizeRpcs(int increment);
 
         /**
@@ -150,14 +195,16 @@ class UnackedRpcResults {
          */
         int len;
 
+      PRIVATE:
         DISALLOW_COPY_AND_ASSIGN(Client);
     };
 
     /**
      * Maps from a registered client ID to #Client.
+     * Clients are dynamically allocated and must be freed explicitly.
      */
-    std::unordered_map<uint64_t, Client*> clients;
     typedef std::unordered_map<uint64_t, Client*> ClientMap;
+    ClientMap clients;
 
     /**
      * Monitor-style lock. Any operation on internal data structure should
@@ -171,7 +218,65 @@ class UnackedRpcResults {
      */
     int default_rpclist_size;
 
+    Context* context;
+
+    /**
+     * Allows this module to determine if a lease is still valid.
+     */
+    ClientLeaseValidator* leaseValidator;
+
+    Cleaner cleaner;
+
+    /**
+     * Pointer to reference freer. During garbage collection by ackId,
+     * this freer should be used to designate specific log entry as
+     * cleanable.
+     */
+    AbstractLog::ReferenceFreer* freer;
+
     DISALLOW_COPY_AND_ASSIGN(UnackedRpcResults);
+};
+
+/**
+ * A linearizable RPC handler should construct this class to check duplicate
+ * RPC in progress and to record the result of RPC after processing.
+ *
+ * This handle should be used instead of directly calling UnackedRpcResults
+ * for exception safety.
+ *
+ * Destruction of this class should happen only after log-sync.
+ */
+class UnackedRpcHandle {
+  PUBLIC:
+    UnackedRpcHandle(UnackedRpcResults* unackedRpcResults,
+                     WireFormat::ClientLease clientLease,
+                     uint64_t rpcId,
+                     uint64_t ackId);
+    UnackedRpcHandle(const UnackedRpcHandle& origin);
+    UnackedRpcHandle& operator= (const UnackedRpcHandle& origin);
+    ~UnackedRpcHandle();
+
+    bool isDuplicate();
+    bool isInProgress();
+    uint64_t resultLoc();
+    void recordCompletion(uint64_t result);
+
+  PRIVATE:
+    /// Save clientId and rpcId to be used for recordCompletion later.
+    /// We do this double lookup to circumvent problem while resizing rpcs array
+    uint64_t clientId;
+    uint64_t rpcId;
+
+    /// Keeps the outcome of checkDuplicate() call in constructor.
+    bool duplicate;
+
+    /// Indicates the location of saved result.
+    /// If it is a duplicate RPC, obtained from checkDuplicate() in constructor.
+    /// If it is a new RPC, saved by #UnackedRpcHandle::recordCompletion() call.
+    uint64_t resultPtr;
+
+    /// Pointer to current unackedRpcResults.
+    UnackedRpcResults* rpcResults;
 };
 
 }  // namespace RAMCloud

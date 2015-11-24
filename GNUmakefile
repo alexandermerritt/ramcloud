@@ -30,6 +30,27 @@ GTEST_DIR ?= $(TOP)/gtest
 ZOOKEEPER_LIB := $(LOCAL_PATH)/lib/libzookeeper_mt.a
 ZOOKEEPER_DIR ?= /usr/share/zookeeper
 
+# Determines whether or not RAMCloud is built with support for LogCabin as an
+# ExternalStorage implementation.
+LOGCABIN ?= no
+ifeq ($(LOGCABIN),yes)
+LOGCABIN_LIB ?= logcabin/build/liblogcabin.a
+LOGCABIN_DIR ?= logcabin
+else
+LOGCABIN_LIB :=
+LOGCABIN_DIR :=
+endif
+
+# Determines whether or not RAMCloud is built with support for ZooKeeper as an
+# ExternalStorage implementation.
+ZOOKEEPER ?= yes
+ifeq ($(ZOOKEEPER),yes)
+ZOOKEEPER_LIB ?= -lzookeeper_mt
+ZOOKEEPER_DIR ?= /usr/local/zookeeper-3.4.5
+else
+ZOOKEEPER_LIB :=
+ZOOKEEPER_DIR :=
+endif
 
 ifeq ($(DEBUG),yes)
 BASECFLAGS := -g
@@ -38,7 +59,7 @@ DEBUGFLAGS := -DTESTING=1 -fno-builtin
 else
 BASECFLAGS := -g
 OPTFLAG := -O3
-DEBUGFLAGS := -DNDEBUG -Wno-unused-variable
+DEBUGFLAGS := -DNDEBUG -Wno-unused-variable -Wno-maybe-uninitialized
 endif
 
 COMFLAGS := $(BASECFLAGS) $(OPTFLAG) -fno-strict-aliasing \
@@ -49,6 +70,12 @@ COMFLAGS += -march=core2
 endif
 ifeq ($(VALGRIND),yes)
 COMFLAGS += -DVALGRIND
+endif
+ifeq ($(LOGCABIN),yes)
+COMFLAGS += -DENABLE_LOGCABIN
+endif
+ifeq ($(ZOOKEEPER),yes)
+COMFLAGS += -DENABLE_ZOOKEEPER
 endif
 
 COMWARNS := -Wall -Wformat=2 -Wextra \
@@ -66,7 +93,8 @@ endif
 # Failed deconstructor inlines are generating noise
 # -Winline
 
-LIBS := -L$(LOCAL_PATH)/lib -L$(LOCAL_PATH)/lib64 $(EXTRALIBS) $(ZOOKEEPER_LIB) -lpcrecpp -lboost_program_options \
+LIBS := -L$(LOCAL_PATH)/lib -L$(LOCAL_PATH)/lib64 $(EXTRALIBS) $(LOGCABIN_LIB) $(ZOOKEEPER_LIB) \
+	-lpcrecpp -lboost_program_options \
 	-lprotobuf -lrt -lboost_filesystem -lboost_system \
 	-lpthread -lssl -lcrypto
 ifeq ($(DEBUG),yes)
@@ -74,8 +102,15 @@ ifeq ($(DEBUG),yes)
 LIBS += -rdynamic
 endif
 
-INCLUDES := -I$(TOP)/src -I$(TOP)/$(OBJDIR) -I$(GTEST_DIR)/include -I/usr/local/openonload-201405/src/include \
-			-I$(LOCAL_PATH)/include
+INCLUDES := -I$(TOP)/src \
+            -I$(TOP)/$(OBJDIR) \
+            -I$(GTEST_DIR)/include \
+            -I/usr/local/openonload-201405/src/include \
+			-I$(LOCAL_PATH)/include \
+             $(NULL)
+ifeq ($(LOGCABIN),yes)
+INCLUDES := $(INCLUDES) -I$(LOGCABIN_DIR)/include
+endif
 
 CC ?= gcc
 CXX ?= g++
@@ -89,6 +124,10 @@ PROTOC ?= protoc
 EPYDOC ?= epydoc
 EPYDOCFLAGS ?= --simple-term -v
 DOXYGEN ?= doxygen
+
+# Directory for installation: various subdirectories such as include and
+# bin will be created by "make install".
+INSTALL_DIR ?= install
 
 # Check if OnLoad is installed on the system. OnLoad is required to build
 # SolarFlare driver code.
@@ -118,6 +157,23 @@ else
 $(info >> InfiniBand NOT detected)
 endif
 
+# Determines whether or not to build RAMCloud with DPDK support, such as
+# a DPDK driver for FastTransport. Note: DPDK must be present at "./dpdk"
+# (either directly or via a symbolic link). If you run the script
+# scripts/dpdkBuild.sh, it will install DPDK in an appropriate way.
+DPDK ?= no
+ifeq ($(DPDK),yes)
+INCLUDES += -Idpdk/build/include
+# Note: --whole-archive is necessary to make sure that all of the facilities
+# of the library are available for dynamic linking later.
+LIBS += -Wl,--whole-archive dpdk/build/lib/libintel_dpdk.a -Wl,--no-whole-archive -ldl
+# Note: __STDC_LIMIT_MACROS definition below is needed to avoid
+# compilation errors in DPDK header files.
+COMFLAGS += -DDPDK -Dtypeof=__typeof__
+# Needed as of DPDK 1.8; remove if later versions fix the problem.
+CXXWARNS := $(CXXWARNS) -Wno-literal-suffix
+endif
+
 ifeq ($(YIELD),yes)
 COMFLAGS += -DYIELD=1
 endif
@@ -125,12 +181,14 @@ endif
 CFLAGS_BASE := $(COMFLAGS) -std=gnu0x $(INCLUDES)
 CFLAGS_SILENT := $(CFLAGS_BASE)
 CFLAGS_NOWERROR := $(CFLAGS_BASE) $(CWARNS)
-CFLAGS := $(CFLAGS_BASE) $(CWARNS)
+# CFLAGS := $(CFLAGS_BASE) $(CWARNS)
+CFLAGS := $(CFLAGS_BASE) -Werror $(CWARNS)
 
 CXXFLAGS_BASE := $(COMFLAGS) -std=c++0x $(INCLUDES)
 CXXFLAGS_SILENT := $(CXXFLAGS_BASE) $(EXTRACXXFLAGS)
 CXXFLAGS_NOWERROR := $(CXXFLAGS_BASE) $(CXXWARNS) $(EXTRACXXFLAGS)
-CXXFLAGS := $(CXXFLAGS_BASE) $(CXXWARNS) $(EXTRACXXFLAGS) $(PERF)
+# CXXFLAGS := $(CXXFLAGS_BASE) $(CXXWARNS) $(EXTRACXXFLAGS) $(PERF)
+CXXFLAGS := $(CXXFLAGS_BASE) -Werror $(CXXWARNS) $(EXTRACXXFLAGS) $(PERF)
 
 ifeq ($(COMPILER),intel)
 CXXFLAGS = $(CXXFLAGS_BASE) $(CXXWARNS)
@@ -205,7 +263,7 @@ include bindings/python/Makefrag
 # test scripts, etc.) in the "private" subdirectory.
 include $(wildcard private/MakefragPrivate)
 
-clean: tests-clean docs-clean tags-clean
+clean: tests-clean docs-clean tags-clean install-clean java-clean
 	rm -rf $(OBJDIR)/.deps $(OBJDIR)/*
 
 check:
@@ -237,7 +295,7 @@ docs:
 docs-clean: python-docs-clean
 	rm -rf docs/doxygen/
 
-tags: 
+tags:
 	find . -type f | grep -v "\.git" | grep -v docs | xargs etags
 	find . -type f | grep -v "\.git" | grep -v docs | xargs ctags
 
@@ -248,6 +306,94 @@ tags-clean:
 # prints the value of a make variable.
 print-%:
 	@echo $* = $($*)
+
+# Rebuild the Java bindings
+java: $(OBJDIR)/libramcloud.a
+	cd bindings/java; ./gradlew
+java-clean:
+	cd bindings/java; ./gradlew clean
+
+INSTALL_BINS := \
+    $(OBJDIR)/client \
+    $(OBJDIR)/coordinator \
+    $(OBJDIR)/ensureServers \
+    $(OBJDIR)/libramcloud.so \
+    $(OBJDIR)/server \
+    $(NULL)
+
+INSTALL_LIBS := \
+    $(OBJDIR)/libramcloud.a \
+    $(NULL)
+
+# The header files below are those that must be installed in order to
+# compile RAMCloud applications. Please try to keep this list as short
+# as possible.
+INSTALL_INCLUDES := \
+    src/Atomic.h \
+    src/BoostIntrusive.h \
+    src/Buffer.h \
+    src/ClientException.h \
+    src/CodeLocation.h \
+    src/CoordinatorClient.h \
+    src/CoordinatorRpcWrapper.h \
+    src/Crc32C.h \
+    src/Exception.h \
+    src/Fence.h \
+    src/Key.h \
+    src/IndexRpcWrapper.h \
+    src/LinearizableObjectRpcWrapper.h \
+    src/LogEntryTypes.h \
+    src/Logger.h \
+    src/LogMetadata.h \
+    src/MasterClient.h \
+    src/Minimal.h \
+    src/Object.h \
+    src/ObjectBuffer.h \
+    src/ObjectRpcWrapper.h \
+    src/PerfStats.h \
+    src/RamCloud.h \
+    src/RpcLevel.h \
+    src/RpcWrapper.h \
+    src/RpcTracker.h \
+    src/RejectRules.h \
+    src/ServerId.h \
+    src/ServerIdRpcWrapper.h \
+    src/ServerMetrics.h \
+    src/ServiceMask.h \
+    src/SpinLock.h \
+    src/Status.h \
+    src/TestLog.h \
+    src/Transport.h \
+    src/Tub.h \
+    src/WireFormat.h \
+    $(OBJDIR)/Histogram.pb.h \
+    $(OBJDIR)/Indexlet.pb.h \
+    $(OBJDIR)/LogMetrics.pb.h \
+    $(OBJDIR)/MasterRecoveryInfo.pb.h \
+    $(OBJDIR)/RecoveryPartition.pb.h \
+    $(OBJDIR)/RpcLevelData.h \
+    $(OBJDIR)/ServerConfig.pb.h \
+    $(OBJDIR)/ServerList.pb.h \
+    $(OBJDIR)/ServerStatistics.pb.h \
+    $(OBJDIR)/SpinLockStatistics.pb.h \
+    $(OBJDIR)/TableConfig.pb.h \
+    $(OBJDIR)/Tablets.pb.h \
+    $(NULL)
+
+INSTALLED_BINS := $(patsubst $(OBJDIR)/%, $(INSTALL_DIR)/bin/%, $(INSTALL_BINS))
+INSTALLED_LIBS := $(patsubst $(OBJDIR)/%, $(INSTALL_DIR)/lib/%, $(INSTALL_LIBS))
+
+install: all java
+	mkdir -p $(INSTALL_DIR)/bin
+	cp $(INSTALL_BINS) $(INSTALL_DIR)/bin
+	mkdir -p $(INSTALL_DIR)/include/ramcloud
+	cp $(INSTALL_INCLUDES) $(INSTALL_DIR)/include/ramcloud
+	mkdir -p $(INSTALL_DIR)/lib/ramcloud
+	cp $(INSTALL_LIBS) $(INSTALL_DIR)/lib/ramcloud
+	cp bindings/java/build/install/ramcloud/lib/* $(INSTALL_DIR)/lib/ramcloud
+
+install-clean:
+	rm -rf install
 
 logcabin:
 	cd logcabin; \
@@ -260,5 +406,5 @@ startZoo:
 stopZoo:
 	$(ZOOKEEPER_DIR)/bin/zkServer.sh stop
 
-.PHONY: all always clean check doc docs docs-clean tags tags-clean test tests \
-        logcabin startZoo stopZoo
+.PHONY: all always clean check doc docs docs-clean install tags tags-clean \
+	test tests logcabin startZoo stopZoo

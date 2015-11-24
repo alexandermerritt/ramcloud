@@ -25,20 +25,62 @@ class IndexKey {
 
   PUBLIC:
 
-    /// Structure used to define a range of keys [first key, last key]
+    /// Class used to define a range of keys [first key, last key]
     /// for a particular index id, that can be used to compare a given
     /// object to determine if its corresponding key falls in this range.
-    struct IndexKeyRange {
+    class IndexKeyRange {
+      PUBLIC:
+        enum BoundaryFlags : uint32_t {
+            /// If INCLUDE_BOTH is set, the range is inclusive of both
+            /// firstKey and lastKey.
+            /// i.e., the range is [firstKey, lastKey].
+            INCLUDE_BOTH = 0,
+            /// If EXCLUDE_FIRST is set, the range is exclusive of firstKey,
+            /// and inclusive of lastKey.
+            /// i.e., the range is (firstKey, lastKey].
+            EXCLUDE_FIRST = 1,
+            /// If EXCLUDE_LAST is set, the range is inclusive of fistKey,
+            /// and exclusive of lastKey.
+            /// i.e., the range is [firstKey, lastKey).
+            EXCLUDE_LAST = 2,
+            /// If EXCLUDE_BOTH is set, the range is exclusive of both
+            /// firstKey and lastKey.
+            /// i.e., the range is (firstKey, lastKey).
+            EXCLUDE_BOTH = 3,
+        };
+
         /// Id of the index to which these index keys belong.
         const uint8_t indexId;
         /// Key blob marking the start of the key range.
+        /// It does not necessarily have to be null terminated. The caller must
+        /// ensure that the storage for this key is unchanged through the life
+        /// of this object.
+        /// NULL value indicates lowest possible key.
         const void* firstKey;
-        /// Length of firstKey.
+        /// Length of firstKey. 0 value corresponds to NULL firstKey.
         const uint16_t firstKeyLength;
         /// Key blob marking the end of the key range.
+        /// It does not necessarily have to be null terminated. The caller must
+        /// ensure that the storage for this key is unchanged through the life
+        /// of this object.
+        /// NULL value indicates highest possible key.
         const void* lastKey;
-        /// Length of lastKey.
+        /// Length of lastKey. 0 value corresponds to NULL lastKey.
         const uint16_t lastKeyLength;
+        /// Flags that specify boundary conditions for this range.
+        const BoundaryFlags flags;
+
+        IndexKeyRange(const uint8_t indexId,
+                const void* firstKey, const uint16_t firstKeyLength,
+                const void* lastKey, const uint16_t lastKeyLength,
+                const BoundaryFlags flags = INCLUDE_BOTH)
+        : indexId(indexId)
+        , firstKey(firstKey)
+        , firstKeyLength(firstKeyLength)
+        , lastKey(lastKey)
+        , lastKeyLength(lastKeyLength)
+        , flags(flags)
+        {}
     };
 
     static int keyCompare(const void* key1, uint16_t keyLength1,

@@ -1,4 +1,4 @@
-/* Copyright (c) 2014 Stanford University
+/* Copyright (c) 2014-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -18,7 +18,7 @@
 
 #include <unordered_map>
 
-#include "btreeRamCloud/BtreeMultimap.h"
+#include "btreeRamCloud/Btree.h"
 #include "Common.h"
 #include "HashTable.h"
 #include "SpinLock.h"
@@ -50,109 +50,27 @@ namespace RAMCloud {
 class IndexletManager {
   PUBLIC:
 
-    // forward declaration
-    class Indexlet;
-
-    /////////////////////////// Meta-data related functions //////////////////
-
-    void addIndexlet(uint64_t tableId, uint8_t indexId,
-                uint64_t backingTableId,
-                const void *firstKey, uint16_t firstKeyLength,
-                const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength,
-                uint64_t highestUsedID = 0);
-    void deleteIndexlet(uint64_t tableId, uint8_t indexId,
-                const void *firstKey, uint16_t firstKeyLength,
-                const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength);
-    bool hasIndexlet(uint64_t tableId, uint8_t indexId,
-                const void *key, uint16_t keyLength);
-    size_t getNumIndexlets();
-
-    /////////////////////////// Index data related functions //////////////////
-
-    Status insertEntry(uint64_t tableId, uint8_t indexId,
-                const void* key, KeyLength keyLength,
-                uint64_t pKHash);
-    void lookupIndexKeys(const WireFormat::LookupIndexKeys::Request* reqHdr,
-                WireFormat::LookupIndexKeys::Response* respHdr,
-                Service::Rpc* rpc);
-    Status removeEntry(uint64_t tableId, uint8_t indexId,
-                const void* key, KeyLength keyLength,
-                uint64_t pKHash);
-
-    /// Structure used as the key for key-value pairs in the indexlet tree.
-    struct KeyAndHash {
-        /// Actual bytes of the index key.
-        char key[40];
-        /// Length of index key.
-        uint16_t keyLength;
-        /// Primary key hash of the object the index key points to.
-        /// This is currently being stored as a part of the tree key to enable
-        /// sorting on the key hash if there are multiple index keys with the
-        /// same value of key and keyLength.
-        uint64_t pKHash;
-
-        // btree code uses  empty constructor for keys
-        KeyAndHash()
-            : key()
-            , keyLength()
-            , pKHash()
-        {}
-
-        KeyAndHash(const void *key, uint16_t keyLength, uint64_t pKHash)
-            : key()
-            , keyLength(keyLength)
-            , pKHash(pKHash)
-        {
-            memcpy(this->key, key, keyLength);
-        }
-
-        KeyAndHash(const KeyAndHash& keyAndHash)
-            : key()
-            , keyLength(keyAndHash.keyLength)
-            , pKHash(keyAndHash.pKHash)
-        {
-            memcpy(this->key, keyAndHash.key, keyLength);
-        }
-
-        KeyAndHash& operator =(const KeyAndHash& keyAndHash)
-        {
-            this->keyLength = keyAndHash.keyLength;
-            this->pKHash = keyAndHash.pKHash;
-            memcpy(this->key, keyAndHash.key, keyLength);
-            return *this;
-        }
-    };
-
-    // Btree key compare function
-    struct KeyAndHashCompare {
-      public:
-        bool operator()(const KeyAndHash x, const KeyAndHash y) const
-        {
-            int keyComparison = IndexKey::keyCompare(x.key, x.keyLength,
-                                                     y.key, y.keyLength);
-            if (keyComparison == 0) {
-                return (x.pKHash < y.pKHash);
-            }
-            return keyComparison < 0;
-        }
-    };
-
-    // B+ tree holding key: string, value: primary key hash
-    typedef str::btree_multimap<KeyAndHash, uint64_t, KeyAndHashCompare> Btree;
-
     /**
      * Each indexlet owned by a master is described by fields in this class.
      * Indexlets describe contiguous ranges of secondary key space for a
      * particular index for a given table.
      */
     class Indexlet : public RAMCloud::Indexlet {
-        public:
+      public:
+        enum State : uint8_t {
+            /// The indexlet is available.
+            NORMAL = 0 ,
+            /// The indexlet is being recovered, it is not available.
+            RECOVERING = 1,
+        };
+
         Indexlet(const void *firstKey, uint16_t firstKeyLength,
                  const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength,
-                 Btree *bt)
+                 IndexBtree *bt, IndexletManager::Indexlet::State state)
             : RAMCloud::Indexlet(firstKey, firstKeyLength, firstNotOwnedKey,
                                  firstNotOwnedKeyLength)
             , bt(bt)
+            , state(state)
             , indexletMutex()
         {
         }
@@ -160,6 +78,7 @@ class IndexletManager {
         Indexlet(const Indexlet& indexlet)
             : RAMCloud::Indexlet(indexlet)
             , bt(indexlet.bt)
+            , state(indexlet.state)
             , indexletMutex()
         {}
 
@@ -181,28 +100,61 @@ class IndexletManager {
             }
 
             this->bt = indexlet.bt;
+            this->state = indexlet.state;
             return *this;
         }
 
-        // Attributes of the b+ tree used for holding the indexes.
-        // Note: traits are not currently used during btree initialization.
-        template <typename KeyType>
-        struct traits_nodebug : str::btree_default_set_traits<KeyType>
-        {
-            static const bool selfverify = false;
-            static const bool debug = false;
+        IndexBtree *bt;
 
-            static const int leafslots = 8;
-            static const int innerslots = 8;
-        };
-
-        Btree *bt;
+        /// The state of the tablet, see State.
+        State state;
 
         /// Mutex to protect the indexlet from concurrent access.
         /// A lock for this mutex MUST be held to read or modify any state in
         /// the indexlet.
         SpinLock indexletMutex;
     };
+
+    /////////////////////////// Meta-data related functions //////////////////
+
+    bool addIndexlet(uint64_t tableId, uint8_t indexId,
+            uint64_t backingTableId,
+            const void *firstKey, uint16_t firstKeyLength,
+            const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength,
+            IndexletManager::Indexlet::State state =
+                    IndexletManager::Indexlet::NORMAL,
+            uint64_t nextNodeId = 0);
+    bool changeState(uint64_t tableId, uint8_t indexId,
+            const void *firstKey, uint16_t firstKeyLength,
+            const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength,
+            IndexletManager::Indexlet::State oldState,
+            IndexletManager::Indexlet::State newState);
+    void deleteIndexlet(uint64_t tableId, uint8_t indexId,
+            const void *firstKey, uint16_t firstKeyLength,
+            const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength);
+    IndexletManager::Indexlet* findIndexlet(uint64_t tableId, uint8_t indexId,
+            const void *key, uint16_t keyLength);
+    size_t getNumIndexlets();
+    bool hasIndexlet(uint64_t tableId, uint8_t indexId,
+            const void *key, uint16_t keyLength);
+    bool isGreaterOrEqual(Buffer* nodeObjectValue,
+            const void* compareKey, uint16_t compareKeyLength);
+    void truncateIndexlet(uint64_t tableId, uint8_t indexId,
+            const void* truncateKey, uint16_t truncateKeyLength);
+    void setNextNodeIdIfHigher(uint64_t tableId, uint8_t indexId,
+            const void *key, uint16_t keyLength, uint64_t nextNodeId);
+
+    /////////////////////////// Index data related functions //////////////////
+
+    Status insertEntry(uint64_t tableId, uint8_t indexId,
+            const void* key, KeyLength keyLength,
+            uint64_t pKHash);
+    void lookupIndexKeys(const WireFormat::LookupIndexKeys::Request* reqHdr,
+            WireFormat::LookupIndexKeys::Response* respHdr,
+            Service::Rpc* rpc);
+    Status removeEntry(uint64_t tableId, uint8_t indexId,
+            const void* key, KeyLength keyLength,
+            uint64_t pKHash);
 
     explicit IndexletManager(Context* context, ObjectManager* objectManager);
 
@@ -251,7 +203,8 @@ class IndexletManager {
 
     /// This unordered_multimap is used to store and access all indexlet data.
     typedef std::unordered_multimap<
-                TableAndIndexId, Indexlet, TableAndIndexIdHasher> IndexletMap;
+            TableAndIndexId, IndexletManager::Indexlet, TableAndIndexIdHasher>
+                    IndexletMap;
 
     /// Indexlet map instance storing indexlet mapping for this index server.
     IndexletMap indexletMap;
@@ -264,13 +217,22 @@ class IndexletManager {
     /// Object Manager to handle mapping of index as objects
     ObjectManager* objectManager;
 
+    /////////////////////////// Meta-data related functions //////////////////
+
+    IndexletManager::IndexletMap::iterator findIndexlet(
+            uint64_t tableId, uint8_t indexId,
+            const void* key, uint16_t keyLength, Lock& mutex);
     IndexletManager::IndexletMap::iterator getIndexlet(
-                uint64_t tableId, uint8_t indexId,
-                const void *firstKey, uint16_t firstKeyLength,
-                const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength,
-                Lock& mutex);
-    IndexletMap::iterator lookupIndexlet(uint64_t tableId, uint8_t indexId,
-                const void *key, uint16_t keyLength, Lock& mutex);
+            uint64_t tableId, uint8_t indexId,
+            const void *firstKey, uint16_t firstKeyLength,
+            const void *firstNotOwnedKey, uint16_t firstNotOwnedKeyLength,
+            Lock& mutex);
+
+    /////////////////////////// Index data related functions //////////////////
+
+    bool existsIndexEntry(
+            uint64_t tableId, uint8_t indexId,
+            const void* key, KeyLength keyLength, uint64_t pKHash);
 
     DISALLOW_COPY_AND_ASSIGN(IndexletManager);
 };

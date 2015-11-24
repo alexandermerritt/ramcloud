@@ -1,4 +1,4 @@
-/* Copyright (c) 2010 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any purpose
  * with or without fee is hereby granted, provided that the above copyright
@@ -21,6 +21,7 @@
 #include "Driver.h"
 #include "MacAddress.h"
 #include "Memory.h"
+#include "ServiceLocator.h"
 #include "Tub.h"
 #include "Transport.h"
 
@@ -82,6 +83,7 @@ class Infiniband {
             : devices(ibv_get_device_list(NULL))
         {
             if (devices == NULL) {
+                RAMCLOUD_LOG(WARNING, "Could not open infiniband device list");
                 throw TransportException(HERE,
                     "Could not open infiniband device list", errno);
             }
@@ -115,6 +117,8 @@ class Infiniband {
 
             auto dev = deviceList.lookup(name);
             if (dev == NULL) {
+                RAMCLOUD_LOG(WARNING, "failed to find infiniband device: %s",
+                        name == NULL ? "any" : name);
                 throw TransportException(HERE,
                     format("failed to find infiniband device: %s",
                            name == NULL ? "any" : name), errno);
@@ -122,6 +126,8 @@ class Infiniband {
 
             ctxt = ibv_open_device(dev);
             if (ctxt == NULL) {
+                RAMCLOUD_LOG(WARNING, "failed to open infiniband device: %s",
+                        name == NULL ? "any" : name);
                 throw TransportException(HERE,
                     format("failed to open infiniband device: %s",
                            name == NULL ? "any" : name), errno);
@@ -240,8 +246,8 @@ class Infiniband {
              */
             explicit BadAddressException(const CodeLocation& where,
                                             std::string msg,
-                    const ServiceLocator& serviceLocator) : Exception(where,
-                    "Service locator '" + serviceLocator.getOriginalString() +
+                    const ServiceLocator* serviceLocator) : Exception(where,
+                    "Service locator '" + serviceLocator->getOriginalString() +
                     "' couldn't be converted to Infiniband address: " + msg) {}
         };
         Address* clone() const {
@@ -250,7 +256,7 @@ class Infiniband {
         string toString() const;
 
         Address(Infiniband& infiniband, int physicalPort,
-                   const ServiceLocator& serviceLocator);
+                   const ServiceLocator* serviceLocator);
         Address(Infiniband& infiniband, int physicalPort,
                    uint16_t lid, uint32_t qpn)
             : Driver::Address()
@@ -492,9 +498,25 @@ class Infiniband {
 //  PRIVATE:
     Device device;
     ProtectionDomain pd;
+
+    // A cache of address handles for all of the hosts we have ever
+    // communicated with. Keys are lids. Needed so that we don't have to
+    // call ibv_create_ah for every UD packet in order to send a response
+    // (as of 11/2015, these calls take 40-50us!). These entries are never
+    // garbage collected, but there will be only one entry per host (and the
+    // lids are only 16 bits), so the memory usage should be tolerable.
+    typedef std::unordered_map<uint16_t, ibv_ah*> AddressHandleMap;
+    AddressHandleMap ahMap;
+
     uint64_t totalAddressHandleAllocCalls;
     uint64_t totalAddressHandleAllocTime;
     static const uint32_t MAX_INLINE_DATA = 400;
+
+    // The following variables keep track of queue pair creations and
+    // deletions; this information is printed when queue pair creation fails,
+    // to help provide more information.
+    int totalQpCreates;
+    int totalQpDeletes;
 };
 
 } // namespace RAMCloud

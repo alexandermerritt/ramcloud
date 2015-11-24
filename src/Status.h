@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -78,6 +78,7 @@ typedef enum Status {
     /// (b) the server is not sure it actually has authority to execute
     /// the request, and is checking with the coordinator.
     STATUS_RETRY                        = 17,
+    /// Indicates that the RPC requested an unknown service.
     STATUS_SERVICE_NOT_AVAILABLE        = 18,
     STATUS_TIMEOUT                      = 19,
 
@@ -123,7 +124,22 @@ typedef enum Status {
     /// example: it is outside allowed bounds).
     STATUS_INVALID_PARAMETER            = 30,
 
-    STATUS_MAX_VALUE                    = 30,
+    /// Indicates that client already received the result of the rpc.
+    /// It does not make sense to execute the RPC again. Most likely cause
+    /// is a delayed network packet.
+    STATUS_STALE_RPC                    = 31,
+
+    /// Indicates that the lease of a client is expired on the coordinator.
+    /// Master refused to execute the RPC with expired lease.
+    STATUS_EXPIRED_LEASE                = 32,
+
+    /// Indicates that a client tried to perform transaction operations after
+    /// the transaction commit had already started.
+    STATUS_TX_OP_AFTER_COMMIT           = 33,
+    STATUS_MAX_VALUE                    = 33,
+
+    //TODO(seojin): figure out why compile fails without this..
+    MULTIOP_UNDERWAY                    = 34,
 
     // Note: if you add a new status value you must make the following
     // additional updates:

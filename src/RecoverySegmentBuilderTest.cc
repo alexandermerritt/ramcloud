@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014 Stanford University
+/* Copyright (c) 2012-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -16,6 +16,7 @@
 #include "TestUtil.h"
 #include "Object.h"
 #include "ObjectManager.h"
+#include "PreparedOps.h"
 #include "RecoverySegmentBuilder.h"
 #include "SegmentIterator.h"
 #include "SegmentManager.h"
@@ -111,9 +112,126 @@ TEST_F(RecoverySegmentBuilderTest, build) {
         Buffer buffer;
         object.assembleForLog(buffer);
         ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_OBJ, buffer));
+    }{ // RpcResult should go in partition 1.
+        Key key(1, "1", 1);
+        Buffer dataBuffer;
+        RpcResult rpcResult(1, key.getHash(), 6, 4, 2, dataBuffer);
+        Buffer buffer;
+        rpcResult.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_RPCRESULT, buffer));
+    }{ // RpcResult should go in partition 0.
+        Key key(1, "2", 1);
+        Buffer dataBuffer;
+        RpcResult rpcResult(1, key.getHash(), 5, 3, 1, dataBuffer);
+        Buffer buffer;
+        rpcResult.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_RPCRESULT, buffer));
+    }{ // RpcResult not in any partition.
+        Key key(10, "1", 1);
+        Buffer dataBuffer;
+        RpcResult rpcResult(10, key.getHash(), 10, 5, 2, dataBuffer);
+        Buffer buffer;
+        rpcResult.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_RPCRESULT, buffer));
+    }{ // RpcResult not written before the tablet existed.
+        Key key(2, "1", 1);
+        Buffer dataBuffer;
+        RpcResult rpcResult(2, key.getHash(), 2, 1, 0, dataBuffer);
+        Buffer buffer;
+        rpcResult.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_RPCRESULT, buffer));
+    }{ // PreparedOp and PreparedOpTombstone should go in partition 1.
+        Key key(1, "1", 1);
+        Buffer dataBuffer;
+        PreparedOp op(WireFormat::TxPrepare::WRITE,
+                      1UL, 10UL, 10UL,
+                      key, "hello", 6, 0, 0, dataBuffer);
+
+        Buffer buffer;
+        op.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_PREP, buffer));
+
+        PreparedOpTombstone opTomb(op, 0);
+        buffer.reset();
+        opTomb.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_PREPTOMB, buffer));
+    }{ // PreparedOp and PreparedOpTombstone should go in partition 0.
+        Key key(1, "2", 1);
+        Buffer dataBuffer;
+        PreparedOp op(WireFormat::TxPrepare::READ,
+                      1UL, 10UL, 10UL,
+                      key, "hello", 6, 0, 0, dataBuffer);
+
+        Buffer buffer;
+        op.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_PREP, buffer));
+
+        PreparedOpTombstone opTomb(op, 0);
+        buffer.reset();
+        opTomb.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_PREPTOMB, buffer));
+    }{ // PreparedOp and PreparedOpTombstone not in any partition.
+        Key key(10, "1", 1);
+        Buffer dataBuffer;
+        PreparedOp op(WireFormat::TxPrepare::WRITE,
+                      1UL, 10UL, 10UL,
+                      key, "hello", 6, 0, 0, dataBuffer);
+
+        Buffer buffer;
+        op.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_PREP, buffer));
+
+        PreparedOpTombstone opTomb(op, 0);
+        buffer.reset();
+        opTomb.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_PREPTOMB, buffer));
+    }{ // PreparedOp and PreparedOpTombstone not written
+       // before the tablet existed.
+        Key key(2, "1", 1);
+        Buffer dataBuffer;
+        PreparedOp op(WireFormat::TxPrepare::WRITE,
+                      1UL, 10UL, 10UL,
+                      key, "hello", 6, 0, 0, dataBuffer);
+
+        Buffer buffer;
+        op.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_PREP, buffer));
+
+        PreparedOpTombstone opTomb(op, 0);
+        buffer.reset();
+        opTomb.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_PREPTOMB, buffer));
+    }{ // TxDecisionRecord should go in partition 1.
+        Key key(1, "1", 1);
+        TxDecisionRecord decisionRecord(1, key.getHash(), 6, 1,
+                WireFormat::TxDecision::ABORT, 100);
+        Buffer buffer;
+        decisionRecord.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_TXDECISION, buffer));
+    }{ // TxDecisionRecord should go in partition 0.
+        Key key(1, "2", 1);
+        TxDecisionRecord decisionRecord(1, key.getHash(), 5, 1,
+                WireFormat::TxDecision::ABORT, 100);
+        Buffer buffer;
+        decisionRecord.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_TXDECISION, buffer));
+    }{ // TxDecisionRecord not in any partition.
+        Key key(10, "1", 1);
+        TxDecisionRecord decisionRecord(10, key.getHash(), 10, 1,
+                WireFormat::TxDecision::ABORT, 100);
+        Buffer buffer;
+        decisionRecord.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_TXDECISION, buffer));
+    }{ // TxDecisionRecord not written before the tablet existed.
+        Key key(2, "1", 1);
+        TxDecisionRecord decisionRecord(2, key.getHash(), 2, 1,
+                WireFormat::TxDecision::ABORT, 100);
+        Buffer buffer;
+        decisionRecord.assembleForLog(buffer);
+        ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_TXDECISION, buffer));
     }
 
-    Segment::Certificate certificate;
+    SegmentCertificate certificate;
     uint32_t length = segment->getAppendedLength(&certificate);
     char buf[serverConfig.segmentSize];
     ASSERT_TRUE(segment->copyOut(0, buf, length));
@@ -122,16 +240,32 @@ TEST_F(RecoverySegmentBuilderTest, build) {
     TestLog::Enable _;
     build(buf, length, certificate, 2, partitions, recoverySegments.get());
     EXPECT_TRUE(StringUtil::contains(TestLog::get(),
-        "Couldn't place object with <tableId, keyHash> of <10"));
+        "Couldn't place object"));
     EXPECT_TRUE(StringUtil::contains(TestLog::get(),
         "Skipping object with <tableId, keyHash> of <2"));
     EXPECT_EQ("safeVersion at offset 0, length 12 with version 1 | "
             "object at offset 14, length 34 with tableId 1, key '2' | "
-            "tombstone at offset 50, length 33 with tableId 1, key '2'",
+            "tombstone at offset 50, length 33 with tableId 1, key '2' | "
+            "rpcResult at offset 85, length 44 with tableId 1, "
+                    "keyHash 0x3554F985FBED3C16, leaseId 5, rpcId 3 | "
+            "preparedOp at offset 131, length 66 with tableId 1, key '2', "
+                    "leaseId 1, rpcId 10 | "
+            "preparedOpTombstone at offset 199, length 44 with tableId 1, "
+                    "keyHash 0x3554F985FBED3C16, leaseId 1, rpcId 10 | "
+            "txDecision at offset 245, length 48 with tableId 1, "
+                    "keyHash 0x3554F985FBED3C16, leaseId 5",
             ObjectManager::dumpSegment(&recoverySegments[0]));
     EXPECT_EQ("safeVersion at offset 0, length 12 with version 1 | "
             "object at offset 14, length 34 with tableId 1, key '1' | "
-            "tombstone at offset 50, length 33 with tableId 1, key '1'",
+            "tombstone at offset 50, length 33 with tableId 1, key '1' | "
+            "rpcResult at offset 85, length 44 with tableId 1, "
+                    "keyHash 0xDD5D9F7F60D5B056, leaseId 6, rpcId 4 | "
+            "preparedOp at offset 131, length 66 with tableId 1, key '1', "
+                    "leaseId 1, rpcId 10 | "
+            "preparedOpTombstone at offset 199, length 44 with tableId 1, "
+                    "keyHash 0xDD5D9F7F60D5B056, leaseId 1, rpcId 10 | "
+            "txDecision at offset 245, length 48 with tableId 1, "
+                    "keyHash 0xDD5D9F7F60D5B056, leaseId 6",
             ObjectManager::dumpSegment(&recoverySegments[1]));
 
     certificate.checksum = 0;
@@ -150,7 +284,7 @@ TEST_F(RecoverySegmentBuilderTest, build_safeVersionEntries) {
     safeVersion.assembleForLog(buffer);
 
     ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_SAFEVERSION, buffer));
-    Segment::Certificate certificate;
+    SegmentCertificate certificate;
     uint32_t length = segment->getAppendedLength(&certificate);
     char buf[serverConfig.segmentSize];
     ASSERT_TRUE(segment->copyOut(0, buf, length));
@@ -169,10 +303,47 @@ TEST_F(RecoverySegmentBuilderTest, build_safeVersionEntries) {
             ObjectManager::dumpSegment(&recoverySegments[2]));
 }
 
+TEST_F(RecoverySegmentBuilderTest, build_participantList) {
+    auto build = RecoverySegmentBuilder::build;
+
+    // Create one replica containing a participantList record.
+    LogSegment* segment = segmentManager.allocHeadSegment();
+    WireFormat::TxParticipant participants[3];
+    participants[0] = WireFormat::TxParticipant(1, 2, 10);
+    participants[1] = WireFormat::TxParticipant(123, 234, 11);
+    participants[2] = WireFormat::TxParticipant(111, 222, 12);
+    ParticipantList record(participants, 3, 42, 9);
+    record.getTransactionId();
+    Buffer buffer;
+    record.assembleForLog(buffer);
+
+    ASSERT_TRUE(segment->append(LOG_ENTRY_TYPE_TXPLIST, buffer));
+    SegmentCertificate certificate;
+    uint32_t length = segment->getAppendedLength(&certificate);
+    char buf[serverConfig.segmentSize];
+    ASSERT_TRUE(segment->copyOut(0, buf, length));
+
+    std::unique_ptr<Segment[]> recoverySegments(new Segment[3]);
+    build(buf, length, certificate, 3, partitions, recoverySegments.get());
+
+    EXPECT_EQ("safeVersion at offset 0, length 12 with version 1 | "
+            "participantList at offset 14, length 96 with "
+            "TxId: (leaseId 42, rpcId 9) containing 3 entries",
+            ObjectManager::dumpSegment(&recoverySegments[0]));
+    EXPECT_EQ("safeVersion at offset 0, length 12 with version 1 | "
+            "participantList at offset 14, length 96 with "
+            "TxId: (leaseId 42, rpcId 9) containing 3 entries",
+            ObjectManager::dumpSegment(&recoverySegments[1]));
+    EXPECT_EQ("safeVersion at offset 0, length 12 with version 1 | "
+            "participantList at offset 14, length 96 with "
+            "TxId: (leaseId 42, rpcId 9) containing 3 entries",
+            ObjectManager::dumpSegment(&recoverySegments[2]));
+}
+
 TEST_F(RecoverySegmentBuilderTest, extractDigest) {
     auto extractDigest = RecoverySegmentBuilder::extractDigest;
     LogSegment* segment = segmentManager.allocHeadSegment();
-    Segment::Certificate certificate;
+    SegmentCertificate certificate;
     uint32_t length = segment->getAppendedLength(&certificate);
     char buffer[serverConfig.segmentSize];
     ASSERT_TRUE(segment->copyOut(0, buffer, length));

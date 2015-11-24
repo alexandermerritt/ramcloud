@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2014 Stanford University
+/* Copyright (c) 2009-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -17,15 +17,19 @@
 #define RAMCLOUD_MASTERSERVICE_H
 
 #include "Common.h"
+#include "ClientLeaseValidator.h"
+#include "ClusterClock.h"
 #include "CoordinatorClient.h"
 #include "Log.h"
 #include "LogCleaner.h"
+#include "LogIterator.h"
 #include "HashTable.h"
 #include "MasterTableMetadata.h"
 #include "Object.h"
 #include "ObjectFinder.h"
 #include "ObjectManager.h"
 #include "ReplicaManager.h"
+#include "RpcResult.h"
 #include "SegmentIterator.h"
 #include "SegmentManager.h"
 #include "ServerConfig.h"
@@ -35,8 +39,10 @@
 #include "SideLog.h"
 #include "SpinLock.h"
 #include "TabletManager.h"
+#include "TxRecoveryManager.h"
 #include "IndexletManager.h"
 #include "WireFormat.h"
+#include "UnackedRpcResults.h"
 
 namespace RAMCloud {
 
@@ -56,7 +62,6 @@ class MasterService : public Service {
     virtual ~MasterService();
 
     void dispatch(WireFormat::Opcode opcode, Rpc* rpc);
-    int maxThreads() { return config->master.masterServiceThreadCount; }
 
     /*
      * The following class is used to temporarily disable the servicing of
@@ -84,12 +89,6 @@ class MasterService : public Service {
     const ServerConfig* config;
 
     /**
-     * The ObjectFinder class that is used to locate servers containing
-     * indexlets for data that this server may own.
-     */
-    ObjectFinder objectFinder;
-
-    /**
      * The ObjectManager class that is responsible for object storage.
      */
     ObjectManager objectManager;
@@ -102,9 +101,38 @@ class MasterService : public Service {
     TabletManager tabletManager;
 
     /**
+     * The TxRecoveryManager keeps track of the ongoing transaction recoveries
+     * that have been assigned to this server.
+     */
+    TxRecoveryManager txRecoveryManager;
+
+    /**
      * The IndexletManger class that is responsible for index storage.
      */
     IndexletManager indexletManager;
+
+    /**
+     * Keeps track of the logically most recent cluster-time that this master
+     * service either directly or indirectly received from the coordinator.
+     */
+    ClusterClock clusterClock;
+
+    /**
+     * Allows modules to check if a given client lease is still valid.
+     */
+    ClientLeaseValidator clientLeaseValidator;
+
+    /**
+     * The UnackedRpcResults keeps track of those linearizable rpcs that have
+     * not yet been acknowledged by the client.
+     */
+    UnackedRpcResults unackedRpcResults;
+
+    /**
+     * The PreparedWrites keep track all prepared objects staged during
+     * transactions.
+     */
+    PreparedOps preparedOps;
 
 #ifdef TESTING
     /// Used to pause the read-increment-write cycle in incrementObject
@@ -151,7 +179,10 @@ class MasterService : public Service {
                 int64_t *asInt64,
                 double *asDouble,
                 uint64_t *newVersion,
-                Status *status);
+                Status *status,
+                const WireFormat::Increment::Request* reqHdr = NULL,
+                WireFormat::Increment::Response* respHdr = NULL,
+                uint64_t *rpcResultPtr = NULL);
     void readHashes(
                 const WireFormat::ReadHashes::Request* reqHdr,
                 WireFormat::ReadHashes::Response* respHdr,
@@ -166,6 +197,26 @@ class MasterService : public Service {
     void lookupIndexKeys(const WireFormat::LookupIndexKeys::Request* reqHdr,
                 WireFormat::LookupIndexKeys::Response* respHdr,
                 Rpc* rpc);
+    int migrateSingleIndexObject(
+                ServerId newOwnerMasterId, uint64_t tableId, uint8_t indexId,
+                uint64_t currentBackingTableId, uint64_t newBackingTableId,
+                const void* splitKey, uint16_t splitKeyLength,
+                LogIterator& it,
+                Tub<Segment>& transferSeg,
+                uint64_t& totalObjects,
+                uint64_t& totalTombstones,
+                uint64_t& totalBytes,
+                WireFormat::SplitAndMigrateIndexlet::Response* respHdr);
+  public: // For MigrateTabletBenchmark.
+    Status migrateSingleLogEntry(SegmentIterator& it,
+                Tub<Segment>& transferSeg,
+                uint64_t entryTotals[],
+                uint64_t& totalBytes,
+                uint64_t tableId,
+                uint64_t firstKeyHash,
+                uint64_t lastKeyHash,
+                ServerId receiver);
+  PRIVATE:
     void migrateTablet(const WireFormat::MigrateTablet::Request* reqHdr,
                 WireFormat::MigrateTablet::Response* respHdr,
                 Rpc* rpc);
@@ -183,6 +234,10 @@ class MasterService : public Service {
                 Rpc* rpc);
     void multiWrite(const WireFormat::MultiOp::Request* reqHdr,
                 WireFormat::MultiOp::Response* respHdr,
+                Rpc* rpc);
+    void prepForIndexletMigration(
+                const WireFormat::PrepForIndexletMigration::Request* reqHdr,
+                WireFormat::PrepForIndexletMigration::Response* respHdr,
                 Rpc* rpc);
     void prepForMigration(const WireFormat::PrepForMigration::Request* reqHdr,
                 WireFormat::PrepForMigration::Response* respHdr,
@@ -204,7 +259,11 @@ class MasterService : public Service {
                 WireFormat::RemoveIndexEntry::Response* respHdr,
                 Rpc* rpc);
     void requestInsertIndexEntries(Object& object);
-    void requestRemoveIndexEntries(Buffer& objectBuffer);
+    void requestRemoveIndexEntries(Object& object);
+    void splitAndMigrateIndexlet(
+                const WireFormat::SplitAndMigrateIndexlet::Request* reqHdr,
+                WireFormat::SplitAndMigrateIndexlet::Response* respHdr,
+                Rpc* rpc);
     void splitMasterTablet(const WireFormat::SplitMasterTablet::Request* reqHdr,
                 WireFormat::SplitMasterTablet::Response* respHdr,
                 Rpc* rpc);
@@ -216,9 +275,69 @@ class MasterService : public Service {
                 const WireFormat::TakeIndexletOwnership::Request* reqHdr,
                 WireFormat::TakeIndexletOwnership::Response* respHdr,
                 Rpc* rpc);
+    void txDecision(
+                const WireFormat::TxDecision::Request* reqHdr,
+                WireFormat::TxDecision::Response* respHdr,
+                Rpc* rpc);
+    void txRequestAbort(
+                const WireFormat::TxRequestAbort::Request* reqHdr,
+                WireFormat::TxRequestAbort::Response* respHdr,
+                Rpc* rpc);
+    void txHintFailed(
+                const WireFormat::TxHintFailed::Request* reqHdr,
+                WireFormat::TxHintFailed::Response* respHdr,
+                Rpc* rpc);
+    void txPrepare(
+                const WireFormat::TxPrepare::Request* reqHdr,
+                WireFormat::TxPrepare::Response* respHdr,
+                Rpc* rpc);
     void write(const WireFormat::Write::Request* reqHdr,
                 WireFormat::Write::Response* respHdr,
                 Rpc* rpc);
+
+    /**
+     * Helper function for handling linearizable RPCs. Parse the log location
+     * for RpcResult log entry into actually saved RPC response.
+     *
+     * \param result
+     *      Location of RPC result entry in log. Typically obtained from
+     *      UnackedRpcResults::checkDuplicate.
+     *
+     * \return
+     *      Saved response from original RPC. Rpc handled should respond with
+     *      this response without executing rpc.
+     */
+    template <typename LinearizableRpcType>
+    typename LinearizableRpcType::Response parseRpcResult(uint64_t result) {
+        if (!result) {
+            throw RetryException(HERE, 50, 50,
+                    "Duplicate RPC is in progress.");
+        }
+
+        //Obtain saved RPC response from log.
+        Buffer resultBuffer;
+        Log::Reference resultRef(result);
+        objectManager.getLog()->getEntry(resultRef, resultBuffer);
+        RpcResult savedRec(resultBuffer);
+        return *(reinterpret_cast<const typename LinearizableRpcType::Response*>
+                                                        (savedRec.getResp()));
+    }
+
+    WireFormat::TxPrepare::Vote
+    parsePrepRpcResult(uint64_t result) {
+        if (!result) {
+            throw RetryException(HERE, 50, 50,
+                    "Duplicate RPC is in progress.");
+        }
+
+        //Obtain saved RPC response from log.
+        Buffer resultBuffer;
+        Log::Reference resultRef(result);
+        objectManager.getLog()->getEntry(resultRef, resultBuffer);
+        RpcResult savedRec(resultBuffer);
+        return *(reinterpret_cast<const WireFormat::TxPrepare::Vote*>
+                                                        (savedRec.getResp()));
+    }
 
     /**
      * Counts the number of times disable has been called, minus the number
@@ -298,7 +417,7 @@ class MasterService : public Service {
                 ServerId masterId,
                 uint64_t partitionId,
                 vector<Replica>& replicas,
-                std::unordered_map<uint64_t, uint64_t>& highestBTreeIdMap);
+                std::unordered_map<uint64_t, uint64_t>& nextNodeIdMap);
 
 ///////////////////////////////////////////////////////////////////////////////
 /////////////////////////End of Recovery related code./////////////////////////

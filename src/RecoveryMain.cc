@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2014 Stanford University
+/* Copyright (c) 2009-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -262,10 +262,12 @@ try
             "with key <1,'0'>");
         uint64_t b = Cycles::rdtsc();
         client.testingFill(1, "0", 1, count * tableCount, objectDataSize);
-        LOG(NOTICE, "%d inserts took %lu ticks",
-            count * tableCount, Cycles::rdtsc() - b);
-        LOG(NOTICE, "avg insert took %lu ticks",
-                    (Cycles::rdtsc() - b) / count / tableCount);
+        double seconds = Cycles::toSeconds(Cycles::rdtsc() - b);
+        double objectsPerMicro = static_cast<double>(count*tableCount)
+                *1e-6/seconds;
+        LOG(NOTICE, "%d inserts took %.2f seconds (%.2f Mobjects/sec)",
+            count * tableCount, seconds, objectsPerMicro);
+        LOG(NOTICE, "avg insert took %.1f usec", 1.0/objectsPerMicro);
     } else {
         Buffer writeVal;
 
@@ -341,7 +343,7 @@ try
     // dump the tablet map
     for (uint32_t t = 0; t < tableCount; t++) {
         Transport::SessionRef session =
-            client.objectFinder.lookup(tables[t], "0", 1);
+            context.objectFinder->lookup(tables[t], "0", 1);
         LOG(NOTICE, "%s has table %lu",
             session->getServiceLocator().c_str(), tables[t]);
     }
@@ -352,7 +354,7 @@ try
     // client.ping();
 
     LOG(NOTICE, "- quiescing writes");
-    client.quiesce();
+    client.serverControlAll(WireFormat::ControlOp::QUIESCE);
 
     // Take an initial snapshot of performance metrics.
     ClusterMetrics metricsBefore(&client);
@@ -365,7 +367,7 @@ try
     // Wait for recovery to complete
     for (uint32_t t = 0; t < tableCount; t++) {
         uint64_t tableId = tables[t];
-        client.objectFinder.waitForAllTabletsNormal(tableId);
+        context.objectFinder->waitForAllTabletsNormal(tableId);
     }
     LOG(NOTICE, "all tablets now normal");
 
@@ -381,7 +383,7 @@ try
                 stopTime = Cycles::rdtsc();
         } catch (...) {
         }
-        auto session = client.objectFinder.lookup(tables[t], "0", 1);
+        auto session = context.objectFinder->lookup(tables[t], "0", 1);
         if (nb.size() == objectDataSize) {
             LOG(NOTICE, "recovered value read from %s has length %u",
                 session->getServiceLocator().c_str(), nb.size());
@@ -458,6 +460,7 @@ try
                     metricIt->second);
         }
     }
+    client.serverControlAll(WireFormat::ControlOp::QUIESCE);
 
     return 0;
 } catch (RAMCloud::ClientException& e) {

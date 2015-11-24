@@ -1,4 +1,4 @@
-/* Copyright (c) 2013 Stanford University
+/* Copyright (c) 2013-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -20,14 +20,21 @@
 #include "ShortMacros.h"
 #include "TestLog.h"
 #include "WallTime.h"
+#include "MasterService.h"
 
 namespace RAMCloud {
+
+#ifdef TESTING
+int CleanableSegmentManager::mockLiveObjectUtilization = 0;
+#endif
 
 CleanableSegmentManager::CleanableSegmentManager(
                                     SegmentManager& segmentManager,
                                     const ServerConfig* config,
+                                    Context* context,
                                     LogCleanerMetrics::OnDisk<>& onDiskMetrics)
-    : segmentManager(segmentManager)
+    : context(context)
+    , segmentManager(segmentManager)
     , lastUpdateTimestamp(0)
     , liveObjectBytes(0)
     , undeadTombstoneBytes(0)
@@ -51,6 +58,11 @@ CleanableSegmentManager::~CleanableSegmentManager()
 int
 CleanableSegmentManager::getLiveObjectUtilization()
 {
+#ifdef TESTING
+    if (mockLiveObjectUtilization != 0) {
+        return mockLiveObjectUtilization;
+    }
+#endif
     Lock guard(lock);
     update(guard);
 
@@ -289,6 +301,12 @@ CleanableSegmentManager::scanSegmentTombstones(Lock& guard)
         Buffer buffer;
         it.appendToBuffer(buffer);
         ObjectTombstone tomb(buffer);
+        // Protect tombstones which are still in the hash table since their
+        // references are removed asynchronously.
+        Key key(tomb.getTableId(), tomb.getKey(), tomb.getKeyLength());
+        if (context->getMasterService()->objectManager.keyPointsAtReference(
+                key, s.getReference(it.getOffset())))
+            continue;
         if (!segmentManager.doesIdExist(tomb.getSegmentId())) {
             deadTombstones++;
             // Magic constant indicates the likely full length

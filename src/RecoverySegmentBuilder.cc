@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2013 Stanford University
+/* Copyright (c) 2009-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -15,9 +15,12 @@
 
 #include "RecoverySegmentBuilder.h"
 #include "Object.h"
+#include "RpcResult.h"
 #include "SegmentIterator.h"
 #include "ServerId.h"
 #include "ShortMacros.h"
+#include "PreparedOps.h"
+#include "TxDecisionRecord.h"
 
 namespace RAMCloud {
 
@@ -57,7 +60,7 @@ namespace RAMCloud {
  */
 void
 RecoverySegmentBuilder::build(const void* buffer, uint32_t length,
-                              const Segment::Certificate& certificate,
+                              const SegmentCertificate& certificate,
                               int numPartitions,
                               const ProtoBuf::RecoveryPartition& partitions,
                               Segment* recoverySegments)
@@ -68,7 +71,6 @@ RecoverySegmentBuilder::build(const void* buffer, uint32_t length,
     // Buffer must be retained for iteration to provide storage for header.
     Buffer headerBuffer;
     const SegmentHeader* header = NULL;
-    bool supressNoPartitionWarning = false;
     for (; !it.isDone(); it.next()) {
         LogEntryType type = it.getType();
 
@@ -78,11 +80,16 @@ RecoverySegmentBuilder::build(const void* buffer, uint32_t length,
             continue;
         }
         if (type != LOG_ENTRY_TYPE_OBJ && type != LOG_ENTRY_TYPE_OBJTOMB
-            && type != LOG_ENTRY_TYPE_SAFEVERSION)
+            && type != LOG_ENTRY_TYPE_SAFEVERSION
+            && type != LOG_ENTRY_TYPE_RPCRESULT
+            && type != LOG_ENTRY_TYPE_PREP
+            && type != LOG_ENTRY_TYPE_PREPTOMB
+            && type != LOG_ENTRY_TYPE_TXDECISION
+            && type != LOG_ENTRY_TYPE_TXPLIST)
             continue;
 
         if (header == NULL) {
-            DIE("Found object or tombstone before header while "
+            DIE("Found log entry before header while "
                 "building recovery segments");
         }
 
@@ -90,10 +97,12 @@ RecoverySegmentBuilder::build(const void* buffer, uint32_t length,
         it.appendToBuffer(entryBuffer);
 
         uint64_t tableId = -1;
-        if (type == LOG_ENTRY_TYPE_SAFEVERSION) {
-            // Copy SAFEVERSION to all the partitions for
-            // safeVersion recovery on all recovery masters
-            Log::Position position(header->segmentId, it.getOffset());
+        if (type == LOG_ENTRY_TYPE_SAFEVERSION ||
+            type == LOG_ENTRY_TYPE_TXPLIST)
+        {
+            // Copy SAFEVERSION and ParticipantLists to all the partitions for
+            // safeVersion and ParticipantList recovery on all recovery masters
+            LogPosition position(header->segmentId, it.getOffset());
             for (int i = 0; i < numPartitions; i++) {
                 if (!recoverySegments[i].append(type, entryBuffer)) {
                     LOG(WARNING, "Failure appending to a recovery segment "
@@ -117,6 +126,24 @@ RecoverySegmentBuilder::build(const void* buffer, uint32_t length,
             tableId = tomb.getTableId();
             keyHash = Key::getHash(tableId,
                                    tomb.getKey(), tomb.getKeyLength());
+        } else if (type == LOG_ENTRY_TYPE_RPCRESULT) {
+            RpcResult rpcResult(entryBuffer);
+            tableId = rpcResult.getTableId();
+            keyHash = rpcResult.getKeyHash();
+        } else if (type == LOG_ENTRY_TYPE_PREP) {
+            PreparedOp op(entryBuffer, 0, entryBuffer.size());
+            tableId = op.object.getTableId();
+            keyHash = Key::getHash(tableId,
+                                   op.object.getKey(),
+                                   op.object.getKeyLength());
+        } else if (type == LOG_ENTRY_TYPE_PREPTOMB) {
+            PreparedOpTombstone opTomb(entryBuffer, 0);
+            tableId = opTomb.header.tableId;
+            keyHash = opTomb.header.keyHash;
+        } else if (type == LOG_ENTRY_TYPE_TXDECISION) {
+            TxDecisionRecord decisionRecord(entryBuffer);
+            tableId = decisionRecord.getTableId();
+            keyHash = decisionRecord.getKeyHash();
         } else {
             LOG(WARNING, "Unknown LogEntry (id=%u)", type);
             throw SegmentRecoveryFailedException(HERE);
@@ -124,23 +151,16 @@ RecoverySegmentBuilder::build(const void* buffer, uint32_t length,
 
         const auto* partition = whichPartition(tableId, keyHash, partitions);
         if (!partition) {
-            if (!supressNoPartitionWarning) {
-                LOG(WARNING,
-                    "Couldn't place object with <tableId, keyHash> of "
-                    "<%lu,%lu> into any of the given "
-                    "tablets for recovery; hopefully it belonged to a deleted "
-                    "tablet or lives in another log now. "
-                    "*** Only warning you once; it's likely if you are running "
-                    "recovery.py for testing you just recovered from more "
-                    "failures than you expected in a single run and your "
-                    "numbers are garbage.", tableId, keyHash);
-                supressNoPartitionWarning = true;
-            }
+            // This log record doesn't belong to any of the current
+            // partitions. This can happen when it takes several passes
+            // to complete a recovery: each pass will recover only a subset
+            // of the data.
+            TEST_LOG("Couldn't place object");
             continue;
         }
         uint64_t partitionId = partition->user_data();
 
-        Log::Position position(header->segmentId, it.getOffset());
+        LogPosition position(header->segmentId, it.getOffset());
         if (!isEntryAlive(position, partition)) {
             LOG(NOTICE, "Skipping object with <tableId, keyHash> of "
                 "<%lu,%lu> because it appears to have existed prior "
@@ -184,7 +204,7 @@ RecoverySegmentBuilder::build(const void* buffer, uint32_t length,
  */
 bool
 RecoverySegmentBuilder::extractDigest(const void* buffer, uint32_t length,
-                                      const Segment::Certificate& certificate,
+                                      const SegmentCertificate& certificate,
                                       Buffer* digestBuffer,
                                       Buffer* tableStatsBuffer)
 {
@@ -242,7 +262,7 @@ RecoverySegmentBuilder::extractDigest(const void* buffer, uint32_t length,
  * offset.
  *
  * \param position
- *      Log::Position indicating where this entry occurred in the log. Used to
+ *      LogPosition indicating where this entry occurred in the log. Used to
  *      determine if it was written before a tablet it could belong to was
  *      created.
  * \param tablet
@@ -254,10 +274,10 @@ RecoverySegmentBuilder::extractDigest(const void* buffer, uint32_t length,
  *      a previous instance of the tablet and should be dropped.
  */
 bool
-RecoverySegmentBuilder::isEntryAlive(const Log::Position& position,
+RecoverySegmentBuilder::isEntryAlive(const LogPosition& position,
                                      const ProtoBuf::Tablets::Tablet* tablet)
 {
-    Log::Position minimum(tablet->ctime_log_head_id(),
+    LogPosition minimum(tablet->ctime_log_head_id(),
                           tablet->ctime_log_head_offset());
     return position >= minimum;
 }

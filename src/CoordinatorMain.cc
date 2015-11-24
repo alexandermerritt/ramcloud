@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2013 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -16,15 +16,15 @@
 #include "Common.h"
 #include "ShortMacros.h"
 #include "CoordinatorService.h"
+#include "ExternalStorage.h"
 #include "MockExternalStorage.h"
 #include "OptionParser.h"
 #include "PingService.h"
 #include "PortAlarm.h"
 #include "ServerId.h"
-#include "ServiceManager.h"
 #include "TableManager.h"
 #include "TransportManager.h"
-#include "ZooStorage.h"
+#include "WorkerManager.h"
 
 /**
  * \file
@@ -50,8 +50,9 @@ main(int argc, char *argv[])
     Logger::installCrashBacktraceHandlers();
     string localLocator("???");
     uint32_t deadServerTimeout;
-    uint32_t numThreads;
+    uint32_t maxCores;
     bool reset;
+    bool neverKill;
     Context context(true);
     CoordinatorServerList serverList(&context);
     try {
@@ -65,15 +66,24 @@ main(int argc, char *argv[])
             "timeout, the slower real crashes are responded to. The shorter "
             "the timeout, the greater the chance is of falsely deciding a "
             "machine is down when it's not.")
+            ("maxCores",
+            ProgramOptions::value<uint32_t>(
+                &maxCores)->default_value(4),
+             "Limit on number of cores to use for the dispatch and worker "
+             "threads. This value should not exceed the number of cores "
+             "available on the machine. RAMCloud will try to keep its usage "
+             "under this limit, but may occasionally need to exceed it "
+             "(e.g., to avoid distributed deadlocks). Th limit does not "
+             "include cleaner threads and some other miscellaneous functions.")
+            ("neverKill,n",
+             ProgramOptions::bool_switch(&neverKill),
+             "If specified, the coordinator will never attempt to kill any "
+             "master or remove it from the server list.")
             ("reset",
              ProgramOptions::bool_switch(&reset),
              "If specified, the coordinator will not attempt to recover "
              "any existing cluster state; it will start a new cluster "
-             "from scratch.")
-            ("threads",
-             ProgramOptions::value<uint32_t>(&numThreads)->default_value(5),
-             "Maximum number of threads that can be handling separate"
-             "RPCs in the coordinator service at once.");
+             "from scratch.");
 
         OptionParser optionParser(coordinatorOptions, argc, argv);
 
@@ -85,6 +95,8 @@ main(int argc, char *argv[])
             args.append(argv[i]);
         }
         LOG(NOTICE, "Command line: %s", args.c_str());
+
+        context.workerManager = new WorkerManager(&context, maxCores-1);
 
         pinAllMemory();
         localLocator = optionParser.options.getCoordinatorLocator();
@@ -129,14 +141,9 @@ main(int argc, char *argv[])
 
         CoordinatorService coordinatorService(&context,
                                               deadServerTimeout,
-                                              true,
-                                              numThreads);
-        context.serviceManager->addService(coordinatorService,
-                                           WireFormat::COORDINATOR_SERVICE);
+                                              false,
+                                              neverKill);
         PingService pingService(&context);
-        context.serviceManager->addService(pingService,
-                                           WireFormat::PING_SERVICE);
-
         while (true) {
             context.dispatch->poll();
         }

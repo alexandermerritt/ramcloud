@@ -11,14 +11,23 @@ INFINIBAND_SRCFILES :=
 endif
 
 ifeq ($(ONLOAD),yes)
-SOLARFLARE_SRC := \
+SOLARFLARE_SRCFILES := \
 	src/SolarFlareDriverTest.cc \
 	$(NULL)
 else
-SOLARFLARE_SRC :=
+SOLARFLARE_SRCFILES :=
+endif
+
+ifeq ($(DPDK),yes)
+DPDK_SRCFILES := \
+        src/DpdkDriverTest.cc \
+        $(NULL)
+else
+DPDK_SRCFILES :=
 endif
 
 TESTS_SRCFILES := \
+      src/btreeRamCloud/BtreeTest.cc \
 		  src/AbstractLogTest.cc \
 		  src/AbstractServerListTest.cc \
 		  src/AtomicTest.cc \
@@ -28,16 +37,25 @@ TESTS_SRCFILES := \
 		  src/BackupSelectorTest.cc \
 		  src/BackupServiceTest.cc \
 		  src/BackupStorageTest.cc \
+		  src/BasicTransportTest.cc \
 		  src/BitOpsTest.cc \
 		  src/BoostIntrusiveTest.cc \
 		  src/BufferTest.cc \
 		  src/CacheTraceTest.cc \
 		  src/CleanableSegmentManagerTest.cc \
 		  src/ClientExceptionTest.cc \
+		  src/ClientLeaseAgentTest.cc \
+		  src/ClientLeaseAuthorityTest.cc \
+		  src/ClientLeaseValidatorTest.cc \
+		  src/ClientTransactionManagerTest.cc \
+		  src/ClientTransactionTaskTest.cc \
+		  src/ClusterClockTest.cc \
 		  src/ClusterMetricsTest.cc \
+		  src/ClusterTimeTest.cc \
 		  src/CRamCloudTest.cc \
 		  src/CommonTest.cc \
 		  src/ContextTest.cc \
+		  src/CoordinatorClusterClockTest.cc \
 		  src/CoordinatorRpcWrapperTest.cc \
 		  src/CoordinatorServerListTest.cc \
 		  src/CoordinatorServiceTest.cc \
@@ -62,6 +80,9 @@ TESTS_SRCFILES := \
 		  src/InMemoryStorageTest.cc \
 		  src/IpAddressTest.cc \
 		  src/KeyTest.cc \
+		  src/LinearizableObjectRpcWrapperTest.cc \
+		  src/LockTableTest.cc \
+		  src/LogCabinStorageTest.cc \
 		  src/LogCleanerTest.cc \
 		  src/LogDigestTest.cc \
 		  src/LogEntryRelocatorTest.cc \
@@ -99,6 +120,7 @@ TESTS_SRCFILES := \
 		  src/PingServiceTest.cc \
 		  src/PortAlarm.cc \
 		  src/PortAlarmTest.cc \
+		  src/PreparedOpsTest.cc \
 		  src/PriorityTaskQueueTest.cc \
 		  src/ProtoBufTest.cc \
 		  src/RawMetricsTest.cc \
@@ -107,6 +129,8 @@ TESTS_SRCFILES := \
 		  src/RecoveryTest.cc \
 		  src/ReplicaManagerTest.cc \
 		  src/ReplicatedSegmentTest.cc \
+		  src/RpcLevelTest.cc \
+		  src/RpcResultTest.cc \
 		  src/RpcTrackerTest.cc \
 		  src/RpcWrapperTest.cc \
 		  src/RuntimeOptionsTest.cc \
@@ -124,7 +148,6 @@ TESTS_SRCFILES := \
 		  src/ServerTest.cc \
 		  src/ServerTrackerTest.cc \
 		  src/ServiceLocatorTest.cc \
-		  src/ServiceManagerTest.cc \
 		  src/ServiceMaskTest.cc \
 		  src/ServiceTest.cc \
 		  src/SessionAlarmTest.cc \
@@ -144,22 +167,29 @@ TESTS_SRCFILES := \
 		  src/TestUtil.cc \
 		  src/TestUtilTest.cc \
 		  src/ThreadIdTest.cc \
-		  src/TransportManagerTest.cc \
 		  src/TimeTraceTest.cc \
+		  src/TimeTraceUtilTest.cc \
+		  src/TransactionTest.cc \
+		  src/TransportManagerTest.cc \
 		  src/TransportTest.cc \
+		  src/TxDecisionRecordTest.cc \
+		  src/TxRecoveryManagerTest.cc \
 		  src/TubTest.cc \
 		  src/UdpDriverTest.cc \
+		  src/UnackedRpcResultsTest.cc \
 		  src/UpdateReplicationEpochTaskTest.cc \
 		  src/UtilTest.cc \
 		  src/VarLenArrayTest.cc \
 		  src/WallTimeTest.cc \
 		  src/WindowTest.cc \
 		  src/WireFormatTest.cc \
+		  src/WorkerManagerTest.cc \
 		  src/WorkerSessionTest.cc \
 		  src/WorkerTimerTest.cc \
 		  src/RamCloudTest.cc \
 		  $(INFINIBAND_SRCFILES) \
-		  $(SOLARFLARE_SRC) \
+		  $(SOLARFLARE_SRCFILES) \
+		  $(DPDK_SRCFILES) \
 		  $(OBJDIR)/ProtoBufTest.pb.cc
 
 TESTS_OBJFILES := $(TESTS_SRCFILES)
@@ -214,6 +244,7 @@ $(OBJDIR)/zooTest: $(ZOO_TESTS_OBJFILES) $(OBJDIR)/gtest.a
 # The unit tests don't actually call all of these programs, but
 # they are included here to make sure they continue to build.
 test: $(OBJDIR)/test \
+      $(OBJDIR)/zooTest \
       $(OBJDIR)/CleanerCompactionBenchmark \
       $(OBJDIR)/ClusterPerf \
       $(OBJDIR)/CoordinatorCrashRecovery \
@@ -221,7 +252,10 @@ test: $(OBJDIR)/test \
       $(OBJDIR)/HashTableBenchmark \
       $(OBJDIR)/ObjectManagerBenchmark \
       $(OBJDIR)/Perf \
-      $(OBJDIR)/RecoverSegmentBenchmark
+      $(OBJDIR)/RecoverSegmentBenchmark \
+      $(OBJDIR)/MigrateTabletBenchmark \
+      $(OBJDIR)/libramcloudtest.so \
+      testInstall
 	$(OBJDIR)/test
 
 # This target is intended for running a subset of tests, such as those
@@ -237,6 +271,16 @@ ftest: $(OBJDIR)/test
 zooTest: $(OBJDIR)/zooTest
 	$(OBJDIR)/zooTest
 
+# The following target tries to compile a simple RAMCloud client app using
+# only installed files, in order to ensure that "make install" has pulled
+# together all the information needed by client apps. Note: this target
+# does *not* use the normal compilation flags, since we only want installed
+# info to be available.
+testInstall: install
+	g++ --std=c++0x -g -DNDEBUG -Iinstall/include -I. src/TestClient.cc \
+            -o $(OBJDIR)/TestClient -Linstall/bin -lramcloud \
+            -Wl,-rpath=install/bin
+
 $(OBJDIR)/HashTableBenchmark: $(OBJDIR)/HashTableBenchmark.o $(SHARED_OBJFILES) $(SERVER_OBJFILES)
 	@mkdir -p $(@D)
 	$(CXX) -o $@ $^ $(LIBS)
@@ -246,6 +290,10 @@ $(OBJDIR)/Echo: $(OBJDIR)/Echo.o $(SHARED_OBJFILES) $(SERVER_OBJFILES)
 	$(CXX) -o $@ $^ $(LIBS)
 
 $(OBJDIR)/RecoverSegmentBenchmark: $(OBJDIR)/RecoverSegmentBenchmark.o $(SHARED_OBJFILES) $(SERVER_OBJFILES)
+	@mkdir -p $(@D)
+	$(CXX) -o $@ $^ $(LIBS)
+
+$(OBJDIR)/MigrateTabletBenchmark: $(OBJDIR)/MigrateTabletBenchmark.o $(SHARED_OBJFILES) $(SERVER_OBJFILES)
 	@mkdir -p $(@D)
 	$(CXX) -o $@ $^ $(LIBS)
 
@@ -284,6 +332,21 @@ $(OBJDIR)/ObjectManagerBenchmark: $(OBJDIR)/ObjectManagerBenchmark.o $(SHARED_OB
 $(OBJDIR)/StringKeys: $(OBJDIR)/StringKeys.o $(SHARED_OBJFILES) $(CLIENT_OBJFILES)
 	@mkdir -p $(@D)
 	$(CXX) -o $@ $^ $(LIBS)
+
+TESTS_ONLY_OBJFILES := $(TESTS_SRCFILES)
+TESTS_ONLY_OBJFILES := $(patsubst src/%.cc, $(OBJDIR)/%.o, $(TESTS_ONLY_OBJFILES))
+TESTS_ONLY_OBJFILES := $(patsubst $(OBJDIR)/%.cc, $(OBJDIR)/%.o, $(TESTS_ONLY_OBJFILES))
+TESTS_ONLY_OBJFILES := $(sort \
+               $(SERVER_OBJFILES) \
+               $(COORDINATOR_OBJFILES) \
+               $(TESTS_ONLY_OBJFILES) \
+               $(SHARED_OBJFILES))
+TESTS_ONLY_OBJFILES := $(filter-out %Test.o, $(TESTS_ONLY_OBJFILES))
+TESTS_ONLY_OBJFILES := $(filter-out %TestRunner.o, $(TESTS_ONLY_OBJFILES))
+
+$(OBJDIR)/libramcloudtest.so: $(TESTS_ONLY_OBJFILES)
+	@mkdir -p $(@D)
+	$(CXX) -shared -lpthread -o $@ $^ $(TESTS_LIB)
 
 # Do not remove.
 tests-clean:

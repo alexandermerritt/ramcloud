@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2013 Stanford University
+/* Copyright (c) 2009-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -96,7 +96,7 @@ FreeSegmentRpc::FreeSegmentRpc(Context* context, ServerId backupId,
  *      The objects matching the above parameters will be returned in this
  *      buffer, organized as a Segment.
  */
-Segment::Certificate
+SegmentCertificate
 BackupClient::getRecoveryData(Context* context,
                               ServerId backupId,
                               uint64_t recoveryId,
@@ -169,54 +169,19 @@ GetRecoveryDataRpc::GetRecoveryDataRpc(Context* context,
  *      The intended server for this RPC is not part of the cluster;
  *      if it ever existed, it has since crashed.
  */
-Segment::Certificate
+SegmentCertificate
 GetRecoveryDataRpc::wait()
 {
     waitAndCheckErrors();
     const WireFormat::BackupGetRecoveryData::Response* respHdr(
             getResponseHeader<WireFormat::BackupGetRecoveryData>());
-    Segment::Certificate certificate = respHdr->certificate;
+    SegmentCertificate certificate = respHdr->certificate;
 
     // respHdr off limits.
     response->truncateFront(sizeof(
             WireFormat::BackupGetRecoveryData::Response));
 
     return certificate;
-}
-
-/**
- * Ask a backup to flush all of its data to durable storage.
- * Returns once all dirty buffers have been written to storage.
- * This is useful for measuring recovery performance accurately.
- *
- * \param context
- *      Overall information about this RAMCloud server.
- * \param backupId
- *      Backup whose data should be flushed.
- */
-void
-BackupClient::quiesce(Context* context, ServerId backupId)
-{
-    BackupQuiesceRpc rpc(context, backupId);
-    rpc.wait();
-}
-
-/**
- * Constructor for QuiesceRpc: initiates an RPC in the same way as
- * #BackupClient::quiesce, but returns once the RPC has been initiated,
- * without waiting for it to complete.
- *
- * \param context
- *      Overall information about this RAMCloud server.
- * \param backupId
- *      Backup whose data should be flushed.
- */
-BackupQuiesceRpc::BackupQuiesceRpc(Context* context, ServerId backupId)
-    : ServerIdRpcWrapper(context, backupId,
-            sizeof(WireFormat::BackupQuiesce::Response))
-{
-    allocHeader<WireFormat::BackupQuiesce>(backupId);
-    send();
 }
 
 /**
@@ -358,10 +323,12 @@ StartReadingDataRpc::wait()
     }
 
     // Build #replicas.
-    const Replica* replicaArray = response->getStart<Replica>();
-    for (uint64_t i = 0; i < replicaCount; ++i)
-        result.replicas.push_back(replicaArray[i]);
-    response->truncateFront(replicaCount * sizeof32(Replica));
+    uint32_t offset = 0;
+    for (uint64_t i = 0; i < replicaCount; ++i) {
+        result.replicas.push_back(*(response->getOffset<Replica>(offset)));
+        offset += sizeof32(Replica);
+    }
+    response->truncateFront(offset);
 
     // Copy out log digest.
     if (result.logDigestBytes > 0) {
@@ -566,7 +533,7 @@ BackupClient::writeSegment(Context* context,
                            const Segment* segment,
                            uint32_t offset,
                            uint32_t length,
-                           const Segment::Certificate* certificate,
+                           const SegmentCertificate* certificate,
                            bool open,
                            bool close,
                            bool primary)
@@ -644,7 +611,7 @@ WriteSegmentRpc::WriteSegmentRpc(Context* context,
                                  const Segment* segment,
                                  uint32_t offset,
                                  uint32_t length,
-                                 const Segment::Certificate* certificate,
+                                 const SegmentCertificate* certificate,
                                  bool open,
                                  bool close,
                                  bool primary)
@@ -662,7 +629,7 @@ WriteSegmentRpc::WriteSegmentRpc(Context* context,
     if (reqHdr->certificateIncluded)
         reqHdr->certificate = *certificate;
     else
-        reqHdr->certificate = Segment::Certificate();
+        reqHdr->certificate = SegmentCertificate();
     reqHdr->open = open;
     reqHdr->close = close;
     reqHdr->primary = primary;

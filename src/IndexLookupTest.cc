@@ -1,4 +1,4 @@
-/* Copyright (c) 2014 Stanford University
+/* Copyright (c) 2014-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -45,7 +45,7 @@ class IndexLookupRpcRefresher : public ObjectFinder::TableConfigFetcher {
             if (i == (numTablets - 1))
                 endKeyHash = ~0UL;
             Tablet rawEntry({10, startKeyHash, endKeyHash, ServerId(),
-                            Tablet::NORMAL, Log::Position()});
+                            Tablet::NORMAL, LogPosition()});
             TabletWithLocator entry(rawEntry, buffer);
 
             TabletKey key {entry.tablet.tableId, entry.tablet.startKeyHash};
@@ -76,6 +76,7 @@ class IndexLookupTest : public ::testing::Test {
     MockCluster cluster;
     IndexletManager* im;
     Tub<MockTransport> transport;
+    IndexKey::IndexKeyRange azKeyRange;
 
     IndexLookupTest()
         : logEnabler()
@@ -84,6 +85,7 @@ class IndexLookupTest : public ::testing::Test {
         , cluster(&context)
         , im()
         , transport()
+        , azKeyRange(1, "a", 1, "z", 1)
     {
         Logger::get().setLogLevels(RAMCloud::SILENT_LOG_LEVEL);
 
@@ -97,11 +99,11 @@ class IndexLookupTest : public ::testing::Test {
         config.localLocator = "mock:host=ping1";
         cluster.addServer(config);
 
-        im = &cluster.contexts[0]->masterService->indexletManager;
+        im = &cluster.contexts[0]->getMasterService()->indexletManager;
         ramcloud.construct("mock:");
         transport.construct(ramcloud->clientContext);
 
-        ramcloud->objectFinder.tableConfigFetcher.reset(
+        ramcloud->clientContext->objectFinder->tableConfigFetcher.reset(
                 new IndexLookupRpcRefresher);
         ramcloud->clientContext->transportManager->registerMock(
                 transport.get());
@@ -117,7 +119,7 @@ class IndexLookupTest : public ::testing::Test {
 
 TEST_F(IndexLookupTest, construction) {
     TestLog::Enable _;
-    IndexLookup indexLookup(ramcloud.get(), 10, 1, "a", 1, "z", 1, 1000);
+    IndexLookup indexLookup(ramcloud.get(), 10, azKeyRange);
     EXPECT_EQ("mock:indexserver=0",
         indexLookup.lookupRpc.rpc->session->getServiceLocator());
     EXPECT_EQ(IndexLookup::SENT, indexLookup.lookupRpc.status);
@@ -127,7 +129,7 @@ TEST_F(IndexLookupTest, construction) {
 // Handle the completion of a lookIndexKeys RPC.
 TEST_F(IndexLookupTest, isReady_lookupComplete) {
     TestLog::Enable _;
-    IndexLookup indexLookup(ramcloud.get(), 10, 1, "a", 1, "z", 1, 1000);
+    IndexLookup indexLookup(ramcloud.get(), 10, azKeyRange);
     const char *nextKey = "next key for rpc";
     size_t nextKeyLen = strlen(nextKey) + 1; // include null char
 
@@ -157,7 +159,7 @@ TEST_F(IndexLookupTest, isReady_lookupComplete) {
 // Copy PKHashes from response buffer of lookup RPC into activeHashes
 TEST_F(IndexLookupTest, isReady_activeHashes) {
     TestLog::Enable _;
-    IndexLookup indexLookup(ramcloud.get(), 10, 1, "a", 1, "z", 1, 1000);
+    IndexLookup indexLookup(ramcloud.get(), 10, azKeyRange);
     indexLookup.lookupRpc.rpc->response->emplaceAppend<
         WireFormat::ResponseCommon>()->status = STATUS_OK;
     indexLookup.lookupRpc.rpc->response->emplaceAppend<uint32_t>(10);
@@ -180,7 +182,7 @@ TEST_F(IndexLookupTest, isReady_activeHashes) {
 // has no unread RPC
 TEST_F(IndexLookupTest, isReady_issueNextLookup) {
     TestLog::Enable _;
-    IndexLookup indexLookup(ramcloud.get(), 10, 1, "a", 1, "z", 1, 1000);
+    IndexLookup indexLookup(ramcloud.get(), 10, azKeyRange);
     indexLookup.lookupRpc.rpc->response->emplaceAppend<
             WireFormat::ResponseCommon>()->status = STATUS_OK;
     indexLookup.lookupRpc.rpc->response->emplaceAppend<uint32_t>(10);
@@ -205,7 +207,7 @@ TEST_F(IndexLookupTest, isReady_issueNextLookup) {
 // indicates no outgoing lookup RPC thereafter.
 TEST_F(IndexLookupTest, isReady_allLookupCompleted) {
     TestLog::Enable _;
-    IndexLookup indexLookup(ramcloud.get(), 10, 1, "a", 1, "z", 1, 1000);
+    IndexLookup indexLookup(ramcloud.get(), 10, azKeyRange);
     indexLookup.lookupRpc.rpc->response->emplaceAppend<
             WireFormat::ResponseCommon>()->status = STATUS_OK;
     indexLookup.lookupRpc.rpc->response->emplaceAppend<uint32_t>(10);
@@ -225,7 +227,7 @@ TEST_F(IndexLookupTest, isReady_allLookupCompleted) {
 // Try to assign the current key hash to an existing RPC to the same server.
 TEST_F(IndexLookupTest, isReady_assignPKHashesToSameServer) {
     TestLog::Enable _;
-    IndexLookup indexLookup(ramcloud.get(), 10, 1, "a", 1, "z", 1, 1000);
+    IndexLookup indexLookup(ramcloud.get(), 10, azKeyRange);
     indexLookup.lookupRpc.rpc->response->emplaceAppend<
         WireFormat::ResponseCommon>()->status = STATUS_OK;
     indexLookup.lookupRpc.rpc->response->emplaceAppend<uint32_t>(10);
@@ -244,7 +246,7 @@ TEST_F(IndexLookupTest, isReady_assignPKHashesToSameServer) {
     EXPECT_EQ(IndexLookup::SENT, indexLookup.readRpcs[0].status);
 }
 
-// Adds bogus index entries for an object that shouldn't be in range query
+// Adds bogus index entries for an object that shouldn't be in range query.
 TEST_F(IndexLookupTest, getNext_filtering) {
     ramcloud.construct(&context, "mock:host=coordinator");
     uint64_t tableId = ramcloud->createTable("table");
@@ -256,19 +258,19 @@ TEST_F(IndexLookupTest, getNext_filtering) {
     keyList1[0].keyLength = 11;
     keyList1[0].key = "primaryKey1";
     keyList1[1].keyLength = 1;
-    keyList1[1].key = "A";
+    keyList1[1].key = "a";
 
     KeyInfo keyList2[2];
     keyList2[0].keyLength = 11;
     keyList2[0].key = "primaryKey2";
     keyList2[1].keyLength = 1;
-    keyList2[1].key = "B";
+    keyList2[1].key = "b";
 
     KeyInfo keyList3[2];
     keyList3[0].keyLength = 11;
     keyList3[0].key = "primaryKey3";
     keyList3[1].keyLength = 1;
-    keyList3[1].key = "C";
+    keyList3[1].key = "c";
 
     ramcloud->write(tableId, numKeys, keyList1, "value1");
     ramcloud->write(tableId, numKeys, keyList2, "value2");
@@ -281,12 +283,34 @@ TEST_F(IndexLookupTest, getNext_filtering) {
     im->insertEntry(tableId, 1, "B2", 2, pkhash);
     im->insertEntry(tableId, 1, "C7", 2, pkhash);
 
-    IndexLookup indexLookup(ramcloud.get(), tableId, 1, "B", 1, "D", 1, 1000);
+    IndexKey::IndexKeyRange keyRange(1, "B", 1, "D", 1);
+    IndexLookup indexLookup(ramcloud.get(), tableId, keyRange);
 
     uint32_t itemsReturned = 0;
-    while (indexLookup.getNext()){
+    while (indexLookup.getNext()) {
         itemsReturned++;
     }
-    EXPECT_EQ(2U, itemsReturned);
+    EXPECT_EQ(0U, itemsReturned);
+
+    // insert extra entries for pkhash A that would land in search range
+    im->insertEntry(tableId, 1, "b2", 2, 81);
+    im->insertEntry(tableId, 1, "c7", 2, pkhash);
+
+    IndexKey::IndexKeyRange keyRange2(1, "b", 1, "d", 1);
+    IndexLookup indexLookup2(ramcloud.get(), tableId, keyRange2);
+
+    EXPECT_TRUE(indexLookup2.getNext());
+    EXPECT_STREQ("primaryKey2",
+        std::string(static_cast<const char*>(
+                        indexLookup2.currentObject()->getKey()),
+                    indexLookup2.currentObject()->getKeyLength(0)).c_str());
+
+    EXPECT_TRUE(indexLookup2.getNext());
+    EXPECT_STREQ("primaryKey3",
+        std::string(static_cast<const char*>(
+                        indexLookup2.currentObject()->getKey()),
+                    indexLookup2.currentObject()->getKeyLength(0)).c_str());
+
+    EXPECT_FALSE(indexLookup2.getNext());
 }
 } // namespace ramcloud

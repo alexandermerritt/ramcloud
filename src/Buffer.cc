@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any purpose
  * with or without fee is hereby granted, provided that the above copyright
@@ -15,6 +15,7 @@
 
 #include "Buffer.h"
 #include "Memory.h"
+#include "Syscall.h"
 
 namespace RAMCloud {
 
@@ -502,13 +503,16 @@ Buffer::getNumberChunks()
 /**
  * Make a subrange of the buffer available as contiguous bytes. If this
  * range is currently split across multiple chunks, it gets copied into
- * auxiliary memory associated with the buffer. Two warnings:
+ * auxiliary memory associated with the buffer. Three warnings:
  * - You really shouldn't invoke this method on large subranges due to
  *   the high cost of copying; try to find a way to process such ranges
  *   piecewise.
  * - Memory allocated for this method will not be reclaimed until the
  *   buffer is reset or destroyed. Thus, if you call this method many
  *   times, it could accumulate a large amount of auxiliary memory.
+ * - The range returned should only be used for read-only operations
+ *   since the allocation returned may live in auxiliary memory, which
+ *   isn't written back into the logical buffer.
  *
  * \param offset
  *      Index within the buffer of the first byte of the desired range.

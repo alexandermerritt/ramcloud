@@ -1,4 +1,4 @@
-/* Copyright (c) 2013 Stanford University
+/* Copyright (c) 2013-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -40,6 +40,16 @@ toString(LogEntryType type)
         return "Object Safe Version";
     case LOG_ENTRY_TYPE_TABLESTATS:
         return "Table Stats Digest";
+    case LOG_ENTRY_TYPE_RPCRESULT:
+        return "Linearizable Rpc Record";
+    case LOG_ENTRY_TYPE_PREP:
+        return "Transaction Prepare Record";
+    case LOG_ENTRY_TYPE_PREPTOMB:
+        return "Transaction Prepare Tombstone";
+    case LOG_ENTRY_TYPE_TXDECISION:
+        return "Transaction Decision Record";
+    case LOG_ENTRY_TYPE_TXPLIST:
+        return "Transaction Participant List Record";
     default:
         return "<<Unknown>>";
     }

@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012 Stanford University
+/* Copyright (c) 2011-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,6 +14,7 @@
  */
 
 #include "BitOps.h"
+#include "PerfStats.h"
 #include "ReplicatedSegment.h"
 #include "Segment.h"
 #include "ShortMacros.h"
@@ -121,6 +122,7 @@ ReplicatedSegment::ReplicatedSegment(Context* context,
     , recoveringFromLostOpenReplicas(false)
     , listEntries()
     , replicationCounter(replicationCounter)
+    , unopenedStartCycles(Cycles::rdtsc())
     , replicas(numReplicas)
 {
     openLen = segment->getAppendedLength(&openingWriteCertificate);
@@ -239,7 +241,7 @@ ReplicatedSegment::close()
     // It is necessary to update queued.bytes here because the segment believes
     // it has fully replicated all data when queued.close and
     // getCommitted().bytes == queued.bytes.
-    Segment::Certificate certificate;
+    SegmentCertificate certificate;
     uint32_t appendedBytes = segment->getAppendedLength(&certificate);
     queued.bytes = appendedBytes;
     queuedCertificate = certificate;
@@ -370,7 +372,7 @@ ReplicatedSegment::handleBackupFailure(ServerId failedId, bool useMinCopysets)
  *      appending to it.
  */
 void
-ReplicatedSegment::sync(uint32_t offset, Segment::Certificate* certificate)
+ReplicatedSegment::sync(uint32_t offset, SegmentCertificate* certificate)
 {
     CycleCounter<RawMetric> _(&metrics->master.replicaManagerTicks);
     TEST_LOG("syncing segment %lu to offset %u", segmentId, offset);
@@ -401,7 +403,7 @@ ReplicatedSegment::sync(uint32_t offset, Segment::Certificate* certificate)
     // If the caller did not provide the desired certificate, obtain the
     // latest one and use that.
     uint32_t appendedBytes = offset;
-    Segment::Certificate localCertificate;
+    SegmentCertificate localCertificate;
     if (certificate == NULL) {
         appendedBytes = segment->getAppendedLength(&localCertificate);
         certificate = &localCertificate;
@@ -529,14 +531,31 @@ void
 ReplicatedSegment::performTask()
 {
     if (freeQueued && !recoveringFromLostOpenReplicas) {
-        foreach (auto& replica, replicas)
+        foreach (Replica& replica, replicas)
             performFree(replica);
         if (!isScheduled()) // Everything is freed, destroy ourself.
             deleter.destroyAndFreeReplicatedSegment(this);
     } else if (!freeQueued) {
-        foreach (auto& replica, replicas)
+        foreach (Replica& replica, replicas)
             performWrite(replica);
     }
+
+    if (unopenedStartCycles != 0) {
+        // The segment is not yet known to be fully open. Once it gets
+        // fully open, update a performance counter with the time to
+        // open it.
+        bool open = true;
+        foreach (Replica& replica, replicas) {
+            if (!replica.committed.open)
+                open = false;
+        }
+        if (open) {
+            PerfStats::threadStats.segmentUnopenedCycles +=
+                    Cycles::rdtsc() - unopenedStartCycles;
+            unopenedStartCycles = 0;
+        }
+    }
+
     // Have to be a bit careful: these steps must be completed even if a
     // free has been enqueued, otherwise lost open replicas could still
     // be detected as the head of the log during a recovery. Hence the
@@ -793,7 +812,7 @@ ReplicatedSegment::performWrite(Replica& replica)
             // If segment is being re-replicated don't send the certificate
             // for the opening write; the replica should atomically commit when
             // it has been fully caught up.
-            Segment::Certificate* certificateToSend = &openingWriteCertificate;
+            SegmentCertificate* certificateToSend = &openingWriteCertificate;
             if (replica.replicateAtomically)
                 certificateToSend = NULL;
 
@@ -803,6 +822,9 @@ ReplicatedSegment::performWrite(Replica& replica)
                                        masterId, segmentId, queued.epoch,
                                        segment, 0, openLen, certificateToSend,
                                        true, false, replicaIsPrimary(replica));
+            if (replicaIsPrimary(replica)) {
+                PerfStats::threadStats.replicationRpcs++;
+            }
             ++writeRpcsInFlight;
             if (LOG_RECOVERY_REPLICATION_RPC_TIMING && recoveryStart) {
                 LOG(DEBUG, "@%7lu: Replica <%s,%lu,%lu> write -> %7u+%7u "
@@ -838,7 +860,7 @@ ReplicatedSegment::performWrite(Replica& replica)
 
             uint32_t offset = replica.sent.bytes;
             uint32_t length = queued.bytes - offset;
-            Segment::Certificate* certificateToSend = &queuedCertificate;
+            SegmentCertificate* certificateToSend = &queuedCertificate;
 
             // Breaks atomicity of log entries, but it could happen anyway
             // if a segment gets partially written to disk.
@@ -879,6 +901,9 @@ ReplicatedSegment::performWrite(Replica& replica)
                                        certificateToSend,
                                        false, sendClose,
                                        replicaIsPrimary(replica));
+            if (replicaIsPrimary(replica)) {
+                PerfStats::threadStats.replicationRpcs++;
+            }
             ++writeRpcsInFlight;
             if (LOG_RECOVERY_REPLICATION_RPC_TIMING && recoveryStart) {
                 LOG(DEBUG, "@%7lu: Replica <%s,%lu,%lu> write -> %7u+%7u "

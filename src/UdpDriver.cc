@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any purpose
  * with or without fee is hereby granted, provided that the above copyright
@@ -71,7 +71,7 @@ UdpDriver::UdpDriver(Context* context,
     }
 
     if (localServiceLocator != NULL) {
-        IpAddress ipAddress(*localServiceLocator);
+        IpAddress ipAddress(localServiceLocator);
         int r = sys->bind(fd, &ipAddress.address, sizeof(ipAddress.address));
         if (r == -1) {
             int e = errno;
@@ -191,7 +191,6 @@ UdpDriver::sendPacket(const Address *addr,
     ssize_t r = sys->sendmsg(socketFd, &msg, 0);
     if (r == -1) {
         LOG(WARNING, "UdpDriver error sending to socket: %s", strerror(errno));
-        close();
         return;
     }
     assert(static_cast<size_t>(r) == totalLength);
@@ -199,7 +198,7 @@ UdpDriver::sendPacket(const Address *addr,
 
 /**
  * Invoked by the dispatcher when our socket becomes readable.
- * Reads a packet from the socket, if there is one, and passes it on
+ * Reads any available packets from the socket, and passes them on
  * to the associated FastTransport instance.
  *
  * \param events
@@ -210,29 +209,33 @@ void
 UdpDriver::ReadHandler::handleFileEvent(int events)
 {
     PacketBuf* buffer;
-    buffer = driver->packetBufPool.construct();
-    socklen_t addrlen = sizeof(&buffer->ipAddress.address);
-    ssize_t r = sys->recvfrom(driver->socketFd, buffer->payload,
-                              MAX_PAYLOAD_SIZE,
-                              MSG_DONTWAIT,
-                              &buffer->ipAddress.address, &addrlen);
-    if (r == -1) {
-        driver->packetBufPool.destroy(buffer);
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
+    // Each iteration through the following loop receives one
+    // incoming packet. Note: reading multiple packets in each call
+    // to this method improves throughput under load by 50%.
+    while (1) {
+        buffer = driver->packetBufPool.construct();
+        socklen_t addrlen = sizeof(buffer->ipAddress.address);
+        ssize_t r = sys->recvfrom(driver->socketFd, buffer->payload,
+                                  MAX_PAYLOAD_SIZE,
+                                  MSG_DONTWAIT,
+                                  &buffer->ipAddress.address, &addrlen);
+        if (r == -1) {
+            driver->packetBufPool.destroy(buffer);
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                return;
+            LOG(WARNING, "UdpDriver error receiving from socket: %s",
+                    strerror(errno));
             return;
-        LOG(WARNING, "UdpDriver error receiving from socket: %s",
-                strerror(errno));
-        driver->close();
-        return;
-    }
-    Received received;
-    received.len = downCast<uint32_t>(r);
+        }
+        Received received;
+        received.len = downCast<uint32_t>(r);
 
-    driver->packetBufsUtilized++;
-    received.payload = buffer->payload;
-    received.sender = &buffer->ipAddress;
-    received.driver = driver;
-    (*driver->incomingPacketHandler)(&received);
+        driver->packetBufsUtilized++;
+        received.payload = buffer->payload;
+        received.sender = &buffer->ipAddress;
+        received.driver = driver;
+        driver->incomingPacketHandler->handlePacket(&received);
+    }
 }
 
 // See docs in Driver class.

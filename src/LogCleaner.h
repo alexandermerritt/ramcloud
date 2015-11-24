@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2014 Stanford University
+/* Copyright (c) 2009-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -79,9 +79,26 @@ class LogCleaner {
     /// that we can never consume more seglets in cleaning than we free.
     enum { MAX_CLEANABLE_MEMORY_UTILIZATION = 98 };
 
+    /// The following class is used to keep the cleaner from running
+    /// during certain other operations (e.g., at the tail end of log
+    /// iteration we need to make sure that there is no data lurking in
+    /// side segments). No cleaning activities will be underway (and no
+    /// data will be present inside segments) at any time when there is
+    /// at least one of these objects whose constructor has returned
+    /// and whose destructor has not been called.
+    class Disabler {
+      public:
+        explicit Disabler(LogCleaner* cleaner);
+        ~Disabler();
+      PRIVATE:
+        /// Copy of construct argument.
+        LogCleaner* cleaner;
+        DISALLOW_COPY_AND_ASSIGN(Disabler);
+    };
+
   PRIVATE:
     typedef LogCleanerMetrics::AtomicCycleCounter AtomicCycleCounter;
-    typedef std::lock_guard<SpinLock> Lock;
+    typedef std::unique_lock<std::mutex> Lock;
 
     /// If no cleaning work had to be done the last time we checked, sleep for
     /// this many microseconds before checking again.
@@ -218,9 +235,11 @@ class LogCleaner {
     uint32_t computeFreeableSeglets(LogSegment* survivor);
     void sortEntriesByTimestamp(EntryVector& entries);
     void getSortedEntries(LogSegmentVector& segmentsToClean,
-                          EntryVector& outEntries);
+                          EntryVector& outEntries,
+                          LogCleanerMetrics::OnDisk<uint64_t>* localMetrics);
     uint64_t relocateLiveEntries(EntryVector& entries,
-                            LogSegmentVector& outSurvivors);
+                            LogSegmentVector& outSurvivors,
+                            LogCleanerMetrics::OnDisk<uint64_t>* localMetrics);
     void closeSurvivor(LogSegment* survivor);
     void waitForAvailableSurvivors(size_t count, uint64_t& outTicks);
 
@@ -290,15 +309,15 @@ class LogCleaner {
                   Buffer& buffer,
                   Log::Reference reference,
                   LogSegment* survivor,
-                  T& metrics,
+                  T* metrics,
                   uint32_t* outBytesAppended)
     {
         LogEntryRelocator relocator(survivor, buffer.size());
         *outBytesAppended = 0;
 
         {
-            metrics.totalRelocationCallbacks++;
-            CycleCounter<uint64_t> _(&metrics.relocationCallbackTicks);
+            metrics->totalRelocationCallbacks++;
+            CycleCounter<uint64_t> _(&metrics->relocationCallbackTicks);
             entryHandlers.relocate(type, buffer, reference, relocator);
         }
 
@@ -307,8 +326,8 @@ class LogCleaner {
 
         if (relocator.relocated()) {
             *outBytesAppended = relocator.getTotalBytesAppended();
-            metrics.totalRelocationAppends++;
-            metrics.relocationAppendTicks += relocator.getAppendTicks();
+            metrics->totalRelocationAppends++;
+            metrics->relocationAppendTicks += relocator.getAppendTicks();
             return RELOCATED;
         }
 
@@ -358,6 +377,24 @@ class LogCleaner {
     /// Size of each full segment in bytes. Used to calculate the amount of
     /// space freed on backup disks.
     uint32_t segmentSize;
+
+    /// Total number of threads actively working (not just sleeping);
+    /// used to implement Disablers.
+    int activeThreads;
+
+    /// Number of Disabler objects currently in existence; if non-zero,
+    /// no new cleaning activities will commence (but existing activities
+    /// may complete).
+    int disableCount;
+
+    /// This variable is signaled if activeThreads becomes zero at a time
+    /// when disableCount is nonzero.
+    std::condition_variable cleanerIdle;
+
+    /// Protects access to activeThreads, disableCount, and cleanerIdle
+    /// (used for synchronization between cleaner threads and Disabler
+    /// objects).
+    std::mutex mutex;
 
     /// Number of cpu cycles spent in the doWork() routine.
     LogCleanerMetrics::Atomic64BitType doWorkTicks;

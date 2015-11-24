@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -21,12 +21,10 @@
 #include "RecoveryPartition.pb.h"
 #include "TableConfig.pb.h"
 
-#include "Common.h"
 #include "ClientException.h"
 #include "CoordinatorRpcWrapper.h"
 #include "ServiceMask.h"
 #include "ServerId.h"
-#include "TransportManager.h"
 #include "ServerConfig.pb.h"
 
 namespace RAMCloud {
@@ -46,6 +44,8 @@ class CoordinatorClient {
             ProtoBuf::ServerConfig_Backup& config);
     static void getBackupList(Context* context,
             ProtoBuf::ServerList* serverList);
+    static WireFormat::ClientLease getLeaseInfo(Context* context,
+            uint64_t leaseId);
     static void getMasterConfig(Context* context,
             ProtoBuf::ServerConfig_Master& config);
     static void getMasterList(Context* context,
@@ -62,6 +62,8 @@ class CoordinatorClient {
             ServerId recoveryMasterId,
             const ProtoBuf::RecoveryPartition* recoveryPartition,
             bool successful);
+    static WireFormat::ClientLease renewLease(Context* context,
+            uint64_t leaseId);
     static void sendServerList(Context* context, ServerId destination);
     static void setMasterRecoveryInfo(Context* context, ServerId serverId,
             const ProtoBuf::MasterRecoveryInfo& recoveryInfo);
@@ -100,6 +102,20 @@ class GetBackupConfigRpc : public CoordinatorRpcWrapper {
 
     PRIVATE:
     DISALLOW_COPY_AND_ASSIGN(GetBackupConfigRpc);
+};
+
+/**
+ * Encapsulates the state of a CoordinatorClient::getLeaseInfo
+ * request, allowing it to execute asynchronously.
+ */
+class GetLeaseInfoRpc : public CoordinatorRpcWrapper {
+    public:
+    GetLeaseInfoRpc(Context* context, uint64_t leaseId);
+    ~GetLeaseInfoRpc() {}
+    WireFormat::ClientLease wait();
+
+    PRIVATE:
+    DISALLOW_COPY_AND_ASSIGN(GetLeaseInfoRpc);
 };
 
 /**
@@ -153,7 +169,7 @@ class HintServerCrashedRpc : public CoordinatorRpcWrapper {
     HintServerCrashedRpc(Context* context, ServerId serverId);
     ~HintServerCrashedRpc() {}
     /// \copydoc RpcWrapper::docForWait
-    void wait() {simpleWait(context->dispatch);}
+    void wait() {simpleWait(context);}
 
     PRIVATE:
     DISALLOW_COPY_AND_ASSIGN(HintServerCrashedRpc);
@@ -170,7 +186,7 @@ class ReassignTabletOwnershipRpc : public CoordinatorRpcWrapper {
             uint64_t ctimeSegmentId, uint32_t ctimeSegmentOffset);
     ~ReassignTabletOwnershipRpc() {}
     /// \copydoc RpcWrapper::docForWait
-    void wait() {simpleWait(context->dispatch);}
+    void wait() {simpleWait(context);}
 
     PRIVATE:
     DISALLOW_COPY_AND_ASSIGN(ReassignTabletOwnershipRpc);
@@ -194,6 +210,20 @@ class RecoveryMasterFinishedRpc : public CoordinatorRpcWrapper {
 };
 
 /**
+ * Encapsulates the state of a CoordinatorClient::renewLease
+ * request, allowing it to execute asynchronously.
+ */
+class RenewLeaseRpc : public CoordinatorRpcWrapper {
+    public:
+    RenewLeaseRpc(Context* context, uint64_t leaseId);
+    ~RenewLeaseRpc() {}
+    WireFormat::ClientLease wait();
+
+    PRIVATE:
+    DISALLOW_COPY_AND_ASSIGN(RenewLeaseRpc);
+};
+
+/**
  * Encapsulates the state of a CoordinatorClient::sendServerList
  * request, allowing it to execute asynchronously.
  */
@@ -202,7 +232,7 @@ class SendServerListRpc : public CoordinatorRpcWrapper {
     SendServerListRpc(Context* context, ServerId destination);
     ~SendServerListRpc() {}
     /// \copydoc RpcWrapper::docForWait
-    void wait() {simpleWait(context->dispatch);}
+    void wait() {simpleWait(context);}
 
     PRIVATE:
     DISALLOW_COPY_AND_ASSIGN(SendServerListRpc);
@@ -218,7 +248,7 @@ class SetMasterRecoveryInfoRpc : public CoordinatorRpcWrapper {
                              const ProtoBuf::MasterRecoveryInfo& recoveryInfo);
     ~SetMasterRecoveryInfoRpc() {}
     /// \copydoc RpcWrapper::docForWait
-    void wait() {simpleWait(context->dispatch);}
+    void wait() {simpleWait(context);}
 
     PRIVATE:
     DISALLOW_COPY_AND_ASSIGN(SetMasterRecoveryInfoRpc);

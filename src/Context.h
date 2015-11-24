@@ -1,5 +1,5 @@
 /* Copyright (c) 2011 Facebook
- * Copyright (c) 2011-2014 Stanford University
+ * Copyright (c) 2011-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -18,29 +18,32 @@
 #define RAMCLOUD_CONTEXT_H
 
 #include "Common.h"
+#include "WireFormat.h"
 
 namespace RAMCloud {
 
 // forward declarations
 class AbstractServerList;
 class BackupService;
+class CacheTrace;
 class CoordinatorServerList;
 class CoordinatorService;
 class CoordinatorSession;
 class Dispatch;
+class DispatchExec;
 class ExternalStorage;
 class Logger;
 class MasterRecoveryManager;
 class MasterService;
 class MockContextMember;
-class ServiceManager;
-class SessionAlarmTimer;
+class ObjectFinder;
 class PortAlarmTimer;
+class Service;
+class WorkerManager;
+class SessionAlarmTimer;
 class TableManager;
 class TimeTrace;
-class CacheTrace;
 class TransportManager;
-class DispatchExec;
 
 /**
  * Context is a container for global variables.
@@ -82,35 +85,32 @@ class Context {
     Dispatch* dispatch;
     MockContextMember* mockContextMember2; ///< for testing purposes
     TransportManager* transportManager;
-    ServiceManager* serviceManager;
     DispatchExec* dispatchExec;
     SessionAlarmTimer* sessionAlarmTimer;
     PortAlarmTimer*    portAlarmTimer;
     CoordinatorSession* coordinatorSession;
     TimeTrace* timeTrace;
     CacheTrace* cacheTrace;
+    ObjectFinder* objectFinder; // On Client and Master, this locator tells
+                                // which master is the owner of an object.
 
     // Variables below this point are used only in servers.  They are
     // always NULL on clients.
 
+    // If this variable is non-NULL, it belongs to the Context and will
+    // be freed when the Context is destroyed.
+    WorkerManager* workerManager;
+
+    // The following array is indexed by WireFormat::ServiceType, and
+    // holds pointers to all of the services currently known in this
+    // context.  NULL means "no such service". Services register themselves
+    // here. The reference objects are not owned by this class (i.e. they
+    // will not be freed here).
+    Service* services[WireFormat::INVALID_SERVICE];
+
     // Valid only on the coordinator; used to save coordinator state so it
     // can be recovered after coordinator crashes.
     ExternalStorage* externalStorage;
-
-    // Master-related information for this server. NULL if this process
-    // is not running a RAMCloud master. Owned elsewhere; not freed by this
-    // class.
-    MasterService* masterService;
-
-    // Backup-related information for this server. NULL if this process
-    // is not running a RAMCloud backup. Owned elsewhere; not freed by this
-    // class.
-    BackupService* backupService;
-
-    // Coordinator-related information for this server. NULL if this process
-    // is not running a RAMCloud coordinator. Owned elsewhere; not freed by
-    // this class.
-    CoordinatorService* coordinatorService;
 
     // The following variable is available on all servers (masters, backups,
     // coordinator). It provides facilities that are common to both ServerList
@@ -132,6 +132,36 @@ class Context {
     // NULL except on coordinators. Owned elsewhere;
     // not freed by this class.
     MasterRecoveryManager* recoveryManager;
+
+    /**
+     * Returns the BackupService associated with this context, if
+     * there is one, or NULL if there is none.
+     */
+    BackupService*
+    getBackupService() {
+        return reinterpret_cast<BackupService*>(
+                services[WireFormat::BACKUP_SERVICE]);
+    }
+
+    /**
+     * Returns the CoordinatorService associated with this context, if
+     * there is one, or NULL if there is none.
+     */
+    CoordinatorService*
+    getCoordinatorService() {
+        return reinterpret_cast<CoordinatorService*>(
+                services[WireFormat::COORDINATOR_SERVICE]);
+    }
+
+    /**
+     * Returns the MasterService associated with this context, if there is one,
+     * or NULL if there is none.
+     */
+    MasterService*
+    getMasterService() {
+        return reinterpret_cast<MasterService*>(
+                services[WireFormat::MASTER_SERVICE]);
+    }
 
   PRIVATE:
     void destroy();

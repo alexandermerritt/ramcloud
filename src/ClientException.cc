@@ -140,6 +140,12 @@ ClientException::throwException(const CodeLocation& where, Status status)
             throw UnknownIndexException(where);
         case STATUS_INVALID_PARAMETER:
             throw InvalidParameterException(where);
+        case STATUS_STALE_RPC:
+            throw StaleRpcException(where);
+        case STATUS_EXPIRED_LEASE:
+            throw ExpiredLeaseException(where);
+        case STATUS_TX_OP_AFTER_COMMIT:
+            throw TxOpAfterCommit(where);
         default:
             throw InternalError(where, status);
     }
@@ -174,7 +180,7 @@ ClientException::toSymbol() const
 string
 ClientException::str() const
 {
-    return format("%s thrown at %s", toString(), where.str().c_str());
+    return format("%s, thrown at %s", toString(), where.str().c_str());
 }
 
 const char*

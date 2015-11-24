@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012 Stanford University
+/* Copyright (c) 2011-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -83,7 +83,6 @@ class ServerRpcPool {
     construct(Args&&... args)
     {
         T* rpc = pool.construct(static_cast<Args&&>(args)...);
-        rpc->epoch = ServerRpcPoolInternal::currentEpoch;
         ServerRpcPoolInternal::outstandingServerRpcs.push_back(*rpc);
         outstandingAllocations++;
         return rpc;
@@ -123,9 +122,13 @@ class ServerRpcPool {
      * \param context
      *      Overall information about the RAMCloud server; used to lock the
      *      dispatcher.
+     * \param activities
+     *      A bit mask of flags such as Transport::READ_ACTIVITY. Only
+     *      RPCs performing at least one of to consider all active RPCs,
+     *      independent of their activities.
      */
     static uint64_t
-    getEarliestOutstandingEpoch(Context* context)
+    getEarliestOutstandingEpoch(Context* context, int activities)
     {
         Dispatch::Lock lock(context->dispatch);
         uint64_t earliest = -1;
@@ -133,11 +136,37 @@ class ServerRpcPool {
         ServerRpcPoolInternal::ServerRpcList::iterator it =
             ServerRpcPoolInternal::outstandingServerRpcs.begin();
         while (it != ServerRpcPoolInternal::outstandingServerRpcs.end()) {
-            earliest = std::min(it->epoch, earliest);
+            if (((it->activities & activities) != 0) & (it->epoch != 0)) {
+                earliest = std::min(it->epoch, earliest);
+            }
             it++;
         }
 
         return earliest;
+    }
+
+    /**
+     * Log information about the epochs for all outstanding RPCs. Intended
+     * for debugging.
+     *
+     * \param context
+     *      Overall information about the RAMCloud server; used to lock the
+     *      dispatcher.
+     */
+    static void
+    logEpochs(Context* context)
+    {
+        Dispatch::Lock lock(context->dispatch);
+
+        ServerRpcPoolInternal::ServerRpcList::iterator it =
+            ServerRpcPoolInternal::outstandingServerRpcs.begin();
+        int count = 0;
+        while (it != ServerRpcPoolInternal::outstandingServerRpcs.end()) {
+            RAMCLOUD_LOG(NOTICE, "Epoch: %lu", it->epoch);
+            it++;
+            count++;
+        }
+        RAMCLOUD_LOG(NOTICE, "Finished with scan: %d RPCs scanned", count);
     }
 
     /**

@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2013 Stanford University
+/* Copyright (c) 2011-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -44,6 +44,9 @@ namespace RAMCloud {
  * - Other threads can invoke Dispatch methods, but they must hold a
  *   Dispatch::Lock object at the time of the invocation, in order to avoid
  *   synchronization problems.
+ * - The Timer methods are thread-safe without acquiring Dispatch::Lock
+ *   (use of Dispatch::Lock is now deprecated because it is slow, so we
+ *   are gradually eliminating its use).
  */
 class Dispatch {
   public:
@@ -61,7 +64,8 @@ class Dispatch {
         return (!hasDedicatedThread || ownerId == ThreadId::get());
     }
 
-    void poll();
+    int poll();
+    void run() __attribute__ ((noreturn));
 
     /// The return value from rdtsc at the beginning of the last call to
     /// #poll.  May be read from multiple threads, so must be volatile.
@@ -92,11 +96,10 @@ class Dispatch {
          * dispatcher during each pass through its inner polling loop.
          *
          * \return
-         *      True means that something interesting happened during this
-         *      call. False means that there was nothing for this particular
-         *      poller to do.
+         *      1 means that this poller did useful work during this call.
+         *      0 means that the poller found no work to do.
          */
-        virtual void poll() = 0;
+        virtual int poll() = 0;
       PRIVATE:
         /// The Dispatch object that owns this Poller.  NULL means the
         /// Dispatch has been deleted.
@@ -191,6 +194,8 @@ class Dispatch {
         void stop();
 
       PROTECTED:
+        void stopInternal(std::lock_guard<SpinLock>& lock);
+
         /// The Dispatch object that owns this Timer.  NULL means the
         /// Dispatch has been deleted.
         Dispatch* owner;
@@ -284,6 +289,10 @@ class Dispatch {
     // of a File.
     int fileInvocationSerial;
 
+    // Protects all accesses to timers and write accesses to
+    // earliestTriggerTime.
+    SpinLock timerMutex;
+
     // Keeps track of all of the timers that are currently active.  We
     // don't use an intrusive list here because it isn't reentrant: we need
     // to add/remove elements while the dispatcher is traversing the list.
@@ -295,7 +304,7 @@ class Dispatch {
 
     // Unique identifier (as returned by ThreadId::get) for the thread that
     // created this object.
-    uint64_t ownerId;
+    int ownerId;
 
     // Used to make sure that only one thread at a time attempts to lock
     // the dispatcher.

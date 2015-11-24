@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2012 Stanford University
+/* Copyright (c) 2009-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -18,6 +18,7 @@
 
 #include "Log.h"
 #include "LogCleaner.h"
+#include "PerfStats.h"
 #include "ServerConfig.h"
 #include "ShortMacros.h"
 
@@ -118,6 +119,15 @@ Log::getMetrics(ProtoBuf::LogMetrics& m)
 }
 
 /**
+ * Return the position of the current log head.
+ */
+LogPosition
+Log::getHead() {
+    Lock lock(appendLock);
+    return LogPosition(head->id, head->getAppendedLength());
+}
+
+/**
  * Wait for all log appends made at the time this method is invoked to be fully
  * replicated to backups. If no appends have ever been done, this method will
  * allocate the first log head and sync it to backups.
@@ -143,7 +153,7 @@ Log::getMetrics(ProtoBuf::LogMetrics& m)
 void
 Log::sync()
 {
-    CycleCounter<uint64_t> __(&metrics.totalSyncTicks);
+    CycleCounter<uint64_t> __(&PerfStats::threadStats.logSyncCycles);
 
     Tub<Lock> lock;
     lock.construct(appendLock);
@@ -185,7 +195,7 @@ Log::sync()
     if (appendedLength > originalHead->syncedLength) {
         // Get the latest segment length and certificate. This allows us to
         // batch up other appends that came in while we were waiting.
-        Segment::Certificate certificate;
+        SegmentCertificate certificate;
         appendedLength = originalHead->getAppendedLength(&certificate);
 
         // Drop the append lock. We don't want to block other appending threads
@@ -216,7 +226,7 @@ Log::sync()
  * be at strictly lower positions in the log, so it's easy to filter during
  * recovery.
  */
-Log::Position
+LogPosition
 Log::rollHeadOver()
 {
     Lock lock(syncLock);
@@ -228,12 +238,12 @@ Log::rollHeadOver()
     // into the main log (by adding segments to a new log digest and syncing
     // that to disk). See RAM-489.
     head = allocNextSegment(true);
-    Segment::Certificate certificate;
+    SegmentCertificate certificate;
     uint32_t appendedLength = head->getAppendedLength(&certificate);
     head->replicatedSegment->sync(appendedLength, &certificate);
     head->syncedLength = appendedLength;
 
-    return Position(head->id, head->getAppendedLength());
+    return LogPosition(head->id, head->getAppendedLength());
 }
 
 /******************************************************************************

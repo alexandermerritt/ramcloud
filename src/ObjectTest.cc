@@ -1,4 +1,4 @@
-/* Copyright (c) 2014 Stanford University
+/* Copyright (c) 2014-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -36,6 +36,7 @@ class ObjectTest : public ::testing::Test {
           buffer2(),
           buffer3(),
           buffer4(),
+          contiguousBuffer(),
           objectDataFromBuffer(),
           objectFromMultiChunkBuffer(),
           objectFromContiguousBuffer(),
@@ -105,9 +106,6 @@ class ObjectTest : public ::testing::Test {
         objectFromMultiChunkBuffer.construct(buffer4, sizeof32(stringKeys[0]),
                                    length);
 
-        // Construct a contiguous Buffer to test the conversion to void*
-        // optimization
-        Buffer contiguousBuffer;
         contiguousBuffer.appendExternal(buffer4.getRange(0, buffer4.size()),
                                         buffer4.size());
 
@@ -146,6 +144,7 @@ class ObjectTest : public ::testing::Test {
     Buffer buffer2;
     Buffer buffer3;
     Buffer buffer4;
+    Buffer contiguousBuffer;
 
     Tub<Object> objectDataFromBuffer;
     Tub<Object> objectFromMultiChunkBuffer;
@@ -472,11 +471,11 @@ TEST_F(ObjectTest, appendValueToBuffer) {
     for (uint32_t i = 0; i < arrayLength(objects); i++) {
         Object& object = *objects[i];
         Buffer buffer;
-        uint16_t valueOffset = 0;
+        uint32_t valueOffset = 0;
         object.getValueOffset(&valueOffset);
         EXPECT_EQ(16U, valueOffset);
 
-        object.appendValueToBuffer(&buffer, valueOffset);
+        object.appendValueToBuffer(&buffer);
         EXPECT_EQ(4U, buffer.size());
         EXPECT_EQ("YO!", string(reinterpret_cast<const char*>(
                         buffer.getRange(0, 4))));
@@ -575,6 +574,58 @@ TEST_F(ObjectTest, appendKeysAndValueToBuffer_writeSingleKey) {
                     buffer.getRange(3, 3))));
     EXPECT_EQ("YO!", string(reinterpret_cast<const char*>(
                     buffer.getRange(6, 4))));
+}
+
+TEST_F(ObjectTest, changeTableId)
+{
+    Object& object = *objectDataFromBuffer;
+    object.changeTableId(899U);
+
+    EXPECT_EQ(899U, object.header.tableId);
+    EXPECT_EQ(75U, object.header.version);
+    EXPECT_EQ(723U, object.header.timestamp);
+    EXPECT_TRUE(object.checkIntegrity());
+
+    const uint8_t *keysAndValue = reinterpret_cast<const uint8_t *>(
+                            object.getKeysAndValue());
+
+    KeyCount numKeys = *keysAndValue;
+    EXPECT_EQ(3U, numKeys);
+
+    // skip ahead past numKeys
+    keysAndValue = keysAndValue + sizeof(KeyCount);
+
+    const CumulativeKeyLength cumulativeKeyLengthOne = *(reinterpret_cast<
+                                                const CumulativeKeyLength *>(
+                                                keysAndValue));
+    const CumulativeKeyLength cumulativeKeyLengthTwo = *(reinterpret_cast<
+                                                const CumulativeKeyLength *>(
+                                                keysAndValue + 2));
+    const CumulativeKeyLength cumulativeKeyLengthThree = *(reinterpret_cast<
+                                                const CumulativeKeyLength *>(
+                                                keysAndValue + 4));
+
+    EXPECT_EQ(3, cumulativeKeyLengthOne);
+    EXPECT_EQ(6, cumulativeKeyLengthTwo);
+    EXPECT_EQ(9, cumulativeKeyLengthThree);
+
+    // the keys are NULL terminated anyway
+    EXPECT_EQ("ha", string(reinterpret_cast<const char*>(
+                    keysAndValue + 3 * sizeof(CumulativeKeyLength))));
+    EXPECT_EQ("hi", string(reinterpret_cast<const char*>(
+                    keysAndValue + 3 * sizeof(CumulativeKeyLength) + 3)));
+    EXPECT_EQ("ho", string(reinterpret_cast<const char*>(
+                    keysAndValue + 3 * sizeof(CumulativeKeyLength) + 6)));
+
+    EXPECT_EQ(20U, object.keysAndValueLength);
+    EXPECT_FALSE(object.keysAndValue);
+    EXPECT_TRUE(object.keysAndValueBuffer);
+
+    // offset into what getKeysAndValue() returns, to point to the actual data
+    // blob. Skip the cumulative key length values and the key values
+    // numKeys = 3, total length of all 3 keys is 9
+    EXPECT_EQ("YO!", string(reinterpret_cast<const char*>(
+                    keysAndValue + 3 * sizeof(CumulativeKeyLength) + 9)));
 }
 
 TEST_F(ObjectTest, fillKeyOffsets)
@@ -683,7 +734,7 @@ TEST_F(ObjectTest, getValueContiguous) {
 }
 
 TEST_F(ObjectTest, getValueOffset) {
-    uint16_t valueOffset;
+    uint32_t valueOffset;
     EXPECT_TRUE(objects[0]->getValueOffset(&valueOffset));
     EXPECT_EQ(16U, valueOffset);
     EXPECT_TRUE(objects[1]->getValueOffset(&valueOffset));
@@ -938,6 +989,22 @@ TEST_F(ObjectTombstoneTest, appendKeyToBuffer) {
         EXPECT_EQ("key!", string(reinterpret_cast<const char*>(
                           buffer.getRange(0, 5))));
     }
+}
+
+TEST_F(ObjectTombstoneTest, changeTableId) {
+    ObjectTombstone& tombstone = *tombstones[0];
+    tombstone.changeTableId(899U);
+
+    EXPECT_EQ(899U, tombstone.header.tableId);
+    EXPECT_EQ(925U, tombstone.header.segmentId);
+    EXPECT_EQ(58U, tombstone.header.objectVersion);
+    EXPECT_EQ(335U, tombstone.header.timestamp);
+    EXPECT_TRUE(tombstone.checkIntegrity());
+
+    EXPECT_TRUE(tombstone.key);
+    EXPECT_FALSE(tombstone.tombstoneBuffer);
+    EXPECT_EQ("key!", string(reinterpret_cast<const char*>(
+                      tombstone.key)));
 }
 
 TEST_F(ObjectTombstoneTest, getTableId) {

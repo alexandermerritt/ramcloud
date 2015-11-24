@@ -1,6 +1,7 @@
 [submodule "gtest"]
 	path = gtest
+    # relative URL, usually goes to https://github.com/PlatformLab/gtest.git
 	url = ../gtest.git
 [submodule "logcabin"]
 	path = logcabin
-	url = git://github.com/logcabin/logcabin.git
+	url = https://github.com/logcabin/logcabin.git

@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -30,12 +30,13 @@ class SegmentIteratorTest : public ::testing::Test {
         : s()
         , certificate()
     {
+        bzero(s.segletBlocks[0], s.segletSize); // Needed due to RAM-794
         Logger::get().setLogLevels(RAMCloud::SILENT_LOG_LEVEL);
         s.getAppendedLength(&certificate);
     }
 
     Segment s;
-    Segment::Certificate certificate;
+    SegmentCertificate certificate;
 
     DISALLOW_COPY_AND_ASSIGN(SegmentIteratorTest);
 };
@@ -63,7 +64,7 @@ TEST_F(SegmentIteratorTest, constructor_fromSegment_nonEmpty) {
 TEST_F(SegmentIteratorTest, constructor_fromBuffer) {
     char buf[8192];
     {
-        SegmentIterator it(buf, 0, Segment::Certificate());
+        SegmentIterator it(buf, 0, SegmentCertificate());
         EXPECT_THROW(it.checkMetadataIntegrity(),
                      SegmentIteratorException);
     }
@@ -138,9 +139,9 @@ TEST_F(SegmentIteratorTest, next) {
     EXPECT_EQ(0U, it.currentOffset);
     EXPECT_EQ(s.getEntryHeader(0), it.currentHeader);
     it.getLength();
-    EXPECT_TRUE(it.currentLength);
+    EXPECT_FALSE(it.currentLength);
     it.next();
-    EXPECT_TRUE(it.currentLength);  // isDone() is true, so noop
+    EXPECT_FALSE(it.currentLength);  // isDone() is true, so noop
     EXPECT_EQ(0U, it.currentOffset);
     EXPECT_EQ(s.getEntryHeader(0), it.currentHeader);
 
@@ -182,6 +183,16 @@ TEST_F(SegmentIteratorTest, getLength) {
     EXPECT_EQ(3U, it.getLength());
     it.next();
     EXPECT_EQ(5U, it.getLength());
+}
+TEST_F(SegmentIteratorTest, getOffset_setOffset) {
+    s.append(LOG_ENTRY_TYPE_OBJ, "hi", 3);
+    s.append(LOG_ENTRY_TYPE_OBJTOMB, "hihi", 5);
+    SegmentIterator it(s);
+    uint32_t oldOffset = it.getOffset();
+    it.next();
+    EXPECT_LE(oldOffset, it.getOffset());
+    it.setOffset(oldOffset);
+    EXPECT_EQ(oldOffset, it.getOffset());
 }
 
 TEST_F(SegmentIteratorTest, appendToBuffer) {

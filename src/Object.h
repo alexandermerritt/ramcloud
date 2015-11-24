@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -16,11 +16,33 @@
 #ifndef RAMCLOUD_OBJECT_H
 #define RAMCLOUD_OBJECT_H
 
-#include "Common.h"
 #include "Buffer.h"
 #include "Key.h"
 
 namespace RAMCloud {
+
+typedef uint8_t KeyCount;   // the number of keys in an object
+typedef KeyCount KeyIndex;  // the position of this key: 0 to KeyCount - 1
+typedef KeyLength CumulativeKeyLength;
+
+// A convenience macro to get to the starting of the first key in an object
+#define KEY_INFO_LENGTH(x) \
+    (sizeof32(KeyCount) + (x) * sizeof32(CumulativeKeyLength))
+
+
+// defined in RamCloud.h Forward declaring here to avoid a circular
+// dependency between Object.h and RamCloud.h
+struct KeyInfo;
+
+class Crc32C;
+
+// Represents the number of keys and the cumulative key length values
+struct KeyOffsets
+{
+    KeyCount numKeys;                        // number of keys
+    CumulativeKeyLength cumulativeLengths[]; // starting of the cumulative key
+                                             // length values.
+} __attribute__((packed));
 
 /**
  * This class defines the format of an object stored in the log and provides
@@ -57,28 +79,6 @@ namespace RAMCloud {
  * If Key_i is not present, CumulativeKeyLength_i = CumulativeKeyLength_i-1.
  * Consequently, Length_i = 0
  */
-
-typedef uint8_t KeyCount;   // the number of keys in an object
-typedef KeyCount KeyIndex;  // the position of this key: 0 to KeyCount - 1
-typedef KeyLength CumulativeKeyLength;
-
-// A convenience macro to get to the starting of the first key in an object
-#define KEY_INFO_LENGTH(x) \
-    (sizeof32(KeyCount) + (x) * sizeof32(CumulativeKeyLength))
-
-
-// defined in RamCloud.h Forward declaring here to avoid a circular
-// dependency between Object.h and RamCloud.h
-struct KeyInfo;
-
-// Represents the number of keys and the cumulative key length values
-struct KeyOffsets
-{
-    KeyCount numKeys;                        // number of keys
-    CumulativeKeyLength cumulativeLengths[]; // starting of the cumulative key
-                                             // length values.
-} __attribute__((packed));
-
 class Object {
   public:
     Object(uint64_t tableId, uint64_t version, uint32_t timestamp,
@@ -91,15 +91,17 @@ class Object {
 
     void assembleForLog(Buffer& buffer);
     void assembleForLog(void* buffer);
-    void appendValueToBuffer(Buffer* buffer, uint32_t valueOffset = 0);
+    void appendValueToBuffer(Buffer* buffer);
     static void appendKeysAndValueToBuffer(
             uint64_t tableId, KeyCount numKeys, KeyInfo *keyList,
             const void* value, uint32_t valueLength, Buffer* request,
             uint32_t *length = NULL);
     static void appendKeysAndValueToBuffer(
             Key& key, const void* value, uint32_t valueLength,
-            Buffer* buffer, uint32_t *length = NULL);
+            Buffer* buffer, bool appendCopy = false, uint32_t *length = NULL);
     void appendKeysAndValueToBuffer(Buffer& buffer);
+
+    void changeTableId(uint64_t newTableId);
 
     bool fillKeyOffsets();
 
@@ -115,7 +117,7 @@ class Object {
     const void* getKeysAndValue();
     KeyCount getKeyCount();
     const void* getValue(uint32_t *valueLength = NULL);
-    bool getValueOffset(uint16_t *offset);
+    bool getValueOffset(uint32_t *offset);
     uint32_t getValueLength();
 
     uint32_t getKeysAndValueLength();
@@ -183,6 +185,7 @@ class Object {
     static uint32_t computeChecksum(const Object::Header* object,
                                     uint32_t totalLength);
     uint32_t computeChecksum();
+    void applyChecksum(Crc32C *crc);
 
 
     /// Copy of the object header that is in, or will be written to, the log.
@@ -253,11 +256,13 @@ class ObjectTombstone {
   public:
     ObjectTombstone(Object& object, uint64_t segmentId, uint32_t timestamp);
     explicit ObjectTombstone(Buffer& buffer, uint32_t offset = 0,
-                             uint32_t length = 0);
+            uint32_t length = 0);
 
     void assembleForLog(Buffer& buffer);
     void assembleForLog(void* buffer);
     void appendKeyToBuffer(Buffer& buffer);
+
+    void changeTableId(uint64_t newTableId);
 
     uint64_t getTableId();
     const void* getKey();
@@ -430,7 +435,6 @@ class ObjectSafeVersion {
 
     DISALLOW_COPY_AND_ASSIGN(ObjectSafeVersion);
 };
-
 } // namespace RAMCloud
 
 #endif

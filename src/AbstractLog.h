@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2014 Stanford University
+/* Copyright (c) 2009-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -53,54 +53,6 @@ class SegmentManager;
  */
 class AbstractLog {
   public:
-    /**
-     * Position is a (Segment Id, Segment Offset) tuple that represents a
-     * position in the log. For example, it can be considered the logical time
-     * at which something was appended to the Log. It can be used for things
-     * like computing table partitions and obtaining a master's current log
-     * position.
-     */
-    class Position {
-      public:
-        /**
-         * Default constructor that creates a zeroed position. This refers to
-         * the very beginning of a log.
-         */
-        Position()
-            : pos(0, 0)
-        {
-        }
-
-        /**
-         * Construct a position given a segment identifier and offset within
-         * the segment.
-         */
-        Position(uint64_t segmentId, uint64_t segmentOffset)
-            : pos(segmentId, downCast<uint32_t>(segmentOffset))
-        {
-        }
-
-        bool operator==(const Position& other) const {return pos == other.pos;}
-        bool operator!=(const Position& other) const {return pos != other.pos;}
-        bool operator< (const Position& other) const {return pos <  other.pos;}
-        bool operator<=(const Position& other) const {return pos <= other.pos;}
-        bool operator> (const Position& other) const {return pos >  other.pos;}
-        bool operator>=(const Position& other) const {return pos >= other.pos;}
-
-        /**
-         * Return the segment identifier component of this position object.
-         */
-        uint64_t getSegmentId() const { return pos.first; }
-
-        /**
-         * Return the offset component of this position object.
-         */
-        uint32_t getSegmentOffset() const { return pos.second; }
-
-      PRIVATE:
-        std::pair<uint64_t, uint32_t> pos;
-    };
-
     /// Our append operations will return the same Segment::Reference. Since
     /// callers shouldn't have to know about Segments, we'll alias it here.
     typedef Segment::Reference Reference;
@@ -132,6 +84,18 @@ class AbstractLog {
 
         /// A log reference to the entry once appended is returned here.
         Reference reference;
+    };
+
+    /**
+     * Interface for log reference freer.
+     * freeLogEntry() should call AbstractLog::free() appropriately.
+     * Actual implementer can add additional jobs or make this no-op for test.
+     * Primarily used for garbage collection of RpcResult log entries.
+     */
+    class ReferenceFreer {
+      public:
+        virtual ~ReferenceFreer() {}
+        virtual void freeLogEntry(Reference ref) = 0;
     };
 
     typedef std::lock_guard<SpinLock> Lock;
@@ -215,7 +179,7 @@ class AbstractLog {
      * that is not yet part of the log from SegmentManager. This allows the
      * latter class to ignore any segment ordering constraints until it is
      * time to merge with the log proper.
-     * 
+     *
      * \param mustNotFail
      *      If true, this method must return a valid LogSegment pointer. It may
      *      block indefinitely if necessary. If false, the method must return
@@ -281,9 +245,14 @@ class AbstractLog {
     /// segment in the presence of multiple appending threads.
     SpinLock appendLock;
 
-    // Track the total amount of bytes we have available for live data before
-    // we must reject future appends to avoid constipation
-    uint64_t totalBytesRemaining;
+    // Total amount of log space occupied by long-term data such as
+    // objects. Excludes data that can eventually be cleaned, such
+    // as tombstones.
+    uint64_t totalLiveBytes;
+
+    // Largest value of totalLiveBytes that is "safe" (i.e. the cleaner
+    // can always make progress).
+    uint64_t maxLiveBytes;
 
     /// Various event counters and performance measurements taken during log
     /// operation.
@@ -297,6 +266,28 @@ class AbstractLog {
               totalBytesAppended(0),
               totalMetadataBytesAppended(0)
         {
+        }
+
+        /**
+         * Add all of the metrics this instance to the fields in \a other.
+         * This method is kind of inverted (merges into the arg's fields) due to
+         * weird issues with accessing protected fields through member pointers.
+         */
+        void mergeInto(AbstractLog* other)
+        {
+            other->metrics.totalAppendCalls += totalAppendCalls;
+            other->metrics.totalAppendTicks += totalAppendTicks;
+            other->metrics.totalNoSpaceTicks += totalNoSpaceTicks;
+            other->metrics.totalBytesAppended += totalBytesAppended;
+            other->metrics.totalMetadataBytesAppended +=
+                totalMetadataBytesAppended;
+        }
+
+        /// Reset the metrics for the log to the initial/empty state.
+        void reset()
+        {
+            this->~Metrics();
+            new(this) Metrics{};
         }
 
         /// Total number of times any of the public append() methods have been

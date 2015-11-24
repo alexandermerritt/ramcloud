@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2013 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -28,6 +28,7 @@
 #include "Memory.h"
 #include "RawMetrics.h"
 #include "ShortMacros.h"
+#include "PerfStats.h"
 
 namespace RAMCloud {
 
@@ -74,6 +75,7 @@ SingleFileStorage::Frame::Frame(SingleFileStorage* storage, size_t frameIndex)
     , isOpen(false)
     , isClosed(false)
     , sync(false)
+    , isWriteBuffer(false)
     , appendedToByCurrentProcess(false)
     , appendedLength(0)
     , committedLength(0)
@@ -379,7 +381,10 @@ SingleFileStorage::Frame::close()
     if (isSynced()) {
         if (buffer) {
             buffer.reset();
-            --storage->nonVolatileBuffersInUse;
+            if (isWriteBuffer) {
+                --storage->writeBuffersInUse;
+                isWriteBuffer = false;
+            }
         }
     }
 }
@@ -443,7 +448,10 @@ SingleFileStorage::Frame::free()
 
     if (buffer) {
         buffer.reset();
-        --storage->nonVolatileBuffersInUse;
+        if (isWriteBuffer) {
+            --storage->writeBuffersInUse;
+            isWriteBuffer = false;
+        }
     }
 
     storage->freeMap[frameIndex] = 1;
@@ -491,10 +499,11 @@ SingleFileStorage::Frame::open(bool sync)
 
     // Be careful, if this method throws an exception the storage layer
     // above will leak the count of a non-volatile buffer.
-    storage->nonVolatileBuffersInUse++;
+    storage->writeBuffersInUse++;
     isOpen = true;
     isClosed = false;
     this->sync = sync;
+    isWriteBuffer = true;
     appendedLength = 0;
     committedLength = 0;
     memset(appendedMetadata.get(), '\0', METADATA_SIZE);
@@ -518,6 +527,7 @@ SingleFileStorage::unlockedRead(Frame::Lock& lock, void* buf, size_t count,
     {
         CycleCounter<RawMetric> _(&metrics->backup.storageReadTicks);
         r = pread(fd, buf, count, offset);
+        PerfStats::threadStats.backupReadActiveCycles += _.stop();
     }
     if (r == -1) {
         DIE("Failed to read replica: %s, "
@@ -558,6 +568,7 @@ SingleFileStorage::unlockedWrite(Frame::Lock& lock, void* buf, size_t count,
              offset, count);
     }
     r = pwrite(fd, metadataBuf, metadataCount, metadataOffset);
+    PerfStats::threadStats.backupWriteActiveCycles += writeTicks.stop();
     if (r == -1) {
         DIE("Failed to write metadata for replica: %s, "
             "starting offset in file %lu, length %lu",
@@ -608,7 +619,6 @@ SingleFileStorage::Frame::performRead(Lock& lock)
 {
     assert(loadRequested);
     BufferPtr buffer = storage->allocateBuffer();
-    storage->nonVolatileBuffersInUse++;
     const size_t frameStart = storage->offsetOfFrame(frameIndex);
 
     if (testingSkipRealIo) {
@@ -616,6 +626,8 @@ SingleFileStorage::Frame::performRead(Lock& lock)
     } else {
         ++metrics->backup.storageReadCount;
         metrics->backup.storageReadBytes += storage->segmentSize;
+        ++PerfStats::threadStats.backupReadOps;
+        PerfStats::threadStats.backupReadBytes += storage->segmentSize;
         // Lock released during this call; assume any field could have changed.
         storage->unlockedRead(lock, buffer.get(),
                      storage->segmentSize, frameStart, storage->usingDevNull);
@@ -665,6 +677,8 @@ SingleFileStorage::Frame::performWrite(Lock& lock)
     } else {
         ++metrics->backup.storageWriteCount;
         metrics->backup.storageWriteBytes += dirtyLength;
+        ++PerfStats::threadStats.backupWriteOps;
+        PerfStats::threadStats.backupWriteBytes += dirtyLength;
         // Lock released during this call; assume any field could have changed.
         storage->unlockedWrite(lock, firstDirtyBlock, dirtyLength,
                       frameStart + startOfFirstDirtyBlock,
@@ -681,7 +695,9 @@ SingleFileStorage::Frame::performWrite(Lock& lock)
     // Release the in-memory copy if it won't be used again.
     if (isClosed && isSynced() && !loadRequested && buffer) {
         buffer.reset();
-        --storage->nonVolatileBuffersInUse;
+        assert(isWriteBuffer);
+        --storage->writeBuffersInUse;
+        isWriteBuffer = false;
     }
 
     if (loadRequested) {
@@ -749,14 +765,9 @@ SingleFileStorage::BufferDeleter::operator()(void* buffer)
  *      When specified, writes to this storage instance should be limited
  *      to at most the given rate (in megabytes per second). The special
  *      value 0 turns off throttling.
- * \param maxNonVolatileBuffers
- *      Limit on the number of non-volatile buffers storage will fill with
- *      replica data queued for store before rejecting new open requests
- *      from masters. Setting this too low can severely impact recovery
- *      performance in small clusters. This is because replica loads are
- *      prioritized over stores during recovery so for recovery to proceed
- *      quickly the cluster must be able to buffer all the replicas generated
- *      during recovery.
+ * \param maxWriteBuffers
+ *      Limit on the number of segment replicas representing new data from
+ *      masters that can be stored in memory at any given time.
  * \param filePath
  *      A filesystem path to the device or file where segments will be stored.
  *      If NULL then a temporary file in the system temp directory is created
@@ -770,7 +781,7 @@ SingleFileStorage::BufferDeleter::operator()(void* buffer)
 SingleFileStorage::SingleFileStorage(size_t segmentSize,
                                      size_t frameCount,
                                      size_t writeRateLimit,
-                                     size_t maxNonVolatileBuffers,
+                                     size_t maxWriteBuffers,
                                      const char* filePath,
                                      int openFlags)
     : BackupStorage(segmentSize, Type::DISK, writeRateLimit)
@@ -786,8 +797,8 @@ SingleFileStorage::SingleFileStorage(size_t segmentSize,
     , fd(-1)
     , usingDevNull(filePath != NULL && string(filePath) == "/dev/null")
     , tempFilePath()
-    , nonVolatileBuffersInUse(0)
-    , maxNonVolatileBuffers(maxNonVolatileBuffers)
+    , writeBuffersInUse(0)
+    , maxWriteBuffers(maxWriteBuffers)
     , bufferDeleter(this)
     , buffers()
 {
@@ -923,7 +934,7 @@ SingleFileStorage::FrameRef
 SingleFileStorage::open(bool sync)
 {
     Lock lock(mutex);
-    if (nonVolatileBuffersInUse >= maxNonVolatileBuffers) {
+    if (writeBuffersInUse >= maxWriteBuffers) {
         // Force the master to find some place else and/or backoff.
         LOG(DEBUG, "Master tried to open a storage frame but too many "
             "frames already buffered to accept it; rejecting");
@@ -933,8 +944,8 @@ SingleFileStorage::open(bool sync)
     if (next == FreeMap::npos) {
         next = freeMap.find_first();
         if (next == FreeMap::npos) {
-            LOG(NOTICE, "Master tried to open a storage frame but there "
-                "are no frames free; rejecting");
+            RAMCLOUD_CLOG(NOTICE, "Master tried to open a storage frame "
+                "but there are no frames free; rejecting");
             throw BackupOpenRejectedException(HERE);
         }
     }

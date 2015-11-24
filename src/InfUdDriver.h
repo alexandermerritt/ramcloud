@@ -27,6 +27,7 @@
 #include "Infiniband.h"
 #include "MacAddress.h"
 #include "ObjectPool.h"
+#include "SpinLock.h"
 #include "Tub.h"
 
 namespace RAMCloud {
@@ -58,10 +59,10 @@ class InfUdDriver : public Driver {
                             Buffer::Iterator *payload);
     virtual string getServiceLocator();
 
-    virtual Driver::Address* newAddress(const ServiceLocator& serviceLocator) {
+    virtual Driver::Address* newAddress(const ServiceLocator* serviceLocator) {
         if (localMac) {
             return new MacAddress(
-                serviceLocator.getOption<const char*>("mac"));
+                serviceLocator->getOption<const char*>("mac"));
         } else {
             return new Address(*infiniband, ibPhysicalPort, serviceLocator);
         }
@@ -128,6 +129,12 @@ class InfUdDriver : public Driver {
     /// Number of current allocations from packetBufPool.
     uint64_t            packetBufsUtilized;
 
+    /// Must be held when manipulating packetBufPool or packetBufsUtilized
+    /// (allows the release method to run in worker threads without
+    /// acquiring the Dispatch lock).
+    SpinLock mutex;
+    typedef std::unique_lock<SpinLock> Lock;
+
     /// Infiniband receive buffers, written directly by the HCA.
     Tub<RegisteredBuffers> rxBuffers;
 
@@ -158,7 +165,7 @@ class InfUdDriver : public Driver {
         explicit Poller(Context* context, InfUdDriver* driver)
             : Dispatch::Poller(context->dispatch, "InfUdDriver::Poller")
             , driver(driver) { }
-        virtual void poll();
+        virtual int poll();
       private:
         // Driver on whose behalf this poller operates.
         InfUdDriver* driver;

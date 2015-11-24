@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# Copyright (c) 2010-2014 Stanford University
+# Copyright (c) 2010-2015 Stanford University
 #
 # Permission to use, copy, modify, and distribute this software for any
 # purpose with or without fee is hereby granted, provided that the above
@@ -46,24 +46,30 @@ valgrind_command = ''
 server_locator_templates = {
     'tcp': 'tcp:host=%(host)s,port=%(port)d',
     'tcp-1g': 'tcp:host=%(host1g)s,port=%(port)d',
+    'basic+udp': 'basic+udp:host=%(host)s,port=%(port)d',
+    'basic+udp-1g': 'basic+udp:host=%(host1g)s,port=%(port)d',
     'fast+udp': 'fast+udp:host=%(host)s,port=%(port)d',
     'fast+udp-1g': 'fast+udp:host=%(host1g)s,port=%(port)d',
     'unreliable+udp': 'unreliable+udp:host=%(host)s,port=%(port)d',
     'infrc': 'infrc:host=%(host)s,port=%(port)d',
-    'fast+infud': 'fast+infud:',
-    'unreliable+infud': 'unreliable+infud:',
+    'basic+infud': 'basic+infud:host=%(host1g)s',
+    'fast+infud': 'fast+infud:host=%(host1g)s',
+    'unreliable+infud': 'unreliable+infud:host=%(host1g)s',
     'fast+infeth': 'fast+infeth:mac=00:11:22:33:44:%(id)02x',
     'unreliable+infeth': 'unreliable+infeth:mac=00:11:22:33:44:%(id)02x',
 }
 coord_locator_templates = {
     'tcp': 'tcp:host=%(host)s,port=%(port)d',
     'tcp-1g': 'tcp:host=%(host1g)s,port=%(port)d',
+    'basic+udp': 'basic+udp:host=%(host)s,port=%(port)d',
     'fast+udp': 'fast+udp:host=%(host)s,port=%(port)d',
+    'basic+udp-1g': 'basic+udp:host=%(host1g)s,port=%(port)d',
     'fast+udp-1g': 'fast+udp:host=%(host1g)s,port=%(port)d',
     'unreliable+udp': 'unreliable+udp:host=%(host)s,port=%(port)d',
     'infrc': 'infrc:host=%(host)s,port=%(port)d',
     # Coordinator uses udp even when rest of cluster uses infud
     # or infeth.
+    'basic+infud': 'basic+udp:host=%(host)s,port=%(port)d',
     'fast+infud': 'fast+udp:host=%(host)s,port=%(port)d',
     'unreliable+infud': 'fast+udp:host=%(host)s,port=%(port)d',
     'fast+infeth': 'fast+udp:host=%(host)s,port=%(port)d',
@@ -196,7 +202,7 @@ class Cluster(object):
         self.masters_started = 0
         self.backups_started = 0
 
-        self.coordinator_host= hosts[0]
+        self.coordinator_host= getHosts()[0]
         self.coordinator_locator = coord_locator(self.transport,
                                                  self.coordinator_host)
         self.log_subdir = log.createDir(log_dir, log_exists)
@@ -319,14 +325,14 @@ class Cluster(object):
         """
         log_prefix = '%s/server%d.%s' % (
                       self.log_subdir, self.next_server_id, host[0])
-                     
+
         command = ('%s %s -C %s -L %s -r %d -l %s --clusterName __unnamed__ '
                    '--logFile %s.log --preferredIndex %d %s' %
                    (valgrind_command,
                     server_binary, self.coordinator_locator,
                     server_locator(self.transport, host, port),
                     self.replicas,
-                    self.log_level, 
+                    self.log_level,
                     log_prefix,
                     self.next_server_id,
                     args))
@@ -429,7 +435,7 @@ class Cluster(object):
             ensureCommand = ('%s -C %s -m %d -b %d -l 1 --wait %d '
                              '--logFile %s/ensureServers.log' %
                              (ensure_servers_bin, self.coordinator_locator,
-                             numMasters, numBackups, timeout, 
+                             numMasters, numBackups, timeout,
                              self.log_subdir))
             if self.verbose:
                 print("ensureServers command: %s" % ensureCommand)
@@ -497,7 +503,6 @@ class Cluster(object):
              if os.path.getsize(path) == 0:
                 os.remove(path)
            elif os.path.isdir(path):
-             print(path)
              try:
                 os.rmdir(path)
              except:
@@ -579,7 +584,7 @@ def run(
         valgrind_args='',	   # Additional arguments for valgrind
         disjunct=False,            # Disjunct entities on a server
         coordinator_host=None
-        ):       
+        ):
     """
     Start a coordinator and servers, as indicated by the arguments.
     Then start one or more client processes and wait for them to complete.
@@ -592,24 +597,24 @@ def run(
 
     if verbose:
         print('num_servers=(%d), available hosts=(%d) defined in config.py'
-              % (num_servers, len(hosts)))
+              % (num_servers, len(getHosts())))
         print ('disjunct=', disjunct)
 
 # When disjunct=True, disjuncts Coordinator and Clients on Server nodes.
     if disjunct:
-        if num_servers + num_clients + 1 > len(hosts):
+        if num_servers + num_clients + 1 > len(getHosts()):
             raise Exception('num_servers (%d)+num_clients (%d)+1(coord) exceeds the available hosts (%d)'
-                            % (num_servers, num_clients, len(hosts)))
+                            % (num_servers, num_clients, len(getHosts())))
     else:
-        if num_servers > len(hosts):
+        if num_servers > len(getHosts()):
             raise Exception('num_servers (%d) exceeds the available hosts (%d)'
-                            % (num_servers, len(hosts)))
+                            % (num_servers, len(getHosts())))
 
     if not share_hosts and not client_hosts:
-        if (len(hosts) - num_servers) < 1:
+        if (len(getHosts()) - num_servers) < 1:
             raise Exception('Asked for %d servers without sharing hosts with %d '
                             'clients, but only %d hosts were available'
-                            % (num_servers, num_clients, len(hosts)))
+                            % (num_servers, num_clients, len(getHosts())))
 
     masters_started = 0
     backups_started = 0
@@ -627,10 +632,10 @@ def run(
         cluster.disk = disk1
         cluster.enable_logcabin = enable_logcabin
         cluster.disjunct = disjunct
-        cluster.hosts = hosts
+        cluster.hosts = getHosts()
 
         if not coordinator_host:
-            coordinator_host = cluster.hosts[0]
+            coordinator_host = cluster.hosts[len(cluster.hosts)-1]
         coordinator = cluster.start_coordinator(coordinator_host,
                                                 coordinator_args)
         if disjunct:

@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2014 Stanford University
+/* Copyright (c) 2009-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -188,7 +188,7 @@ TEST_F(ReplicaManagerTest, writeSegment) {
                                            serverId);
             BackupClient::StartPartitioningReplicas(&context, replica.backupId,
                     456lu, serverId, &will);
-            Segment::Certificate certificate =
+            SegmentCertificate certificate =
                 BackupClient::getRecoveryData(&context, replica.backupId, 456lu,
                                               serverId, 88, 0, &resp);
             ASSERT_NE(0U, resp.totalLength);
@@ -335,7 +335,7 @@ TEST_F(ReplicaManagerTest, endToEndBackupRecovery) {
     config.segmentSize = segmentSize;
     config.backup.numSegmentFrames = 4;
     config.localLocator = "mock:host=backup3";
-    ServerId backup3Id = addToServerList(cluster.addServer(config));
+    addToServerList(cluster.addServer(config));
 
     EXPECT_FALSE(mgr->isIdle());
 

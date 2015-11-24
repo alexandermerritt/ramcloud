@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -23,10 +23,8 @@
 #ifndef RAMCLOUD_WIREFORMAT_H
 #define RAMCLOUD_WIREFORMAT_H
 
-#include "Common.h"
-#include "LogMetadata.h"
 #include "RejectRules.h"
-#include "Segment.h"
+#include "LogMetadata.h"
 #include "Status.h"
 
 namespace RAMCloud { namespace WireFormat {
@@ -62,67 +60,77 @@ static_assert(INVALID_SERVICE < (sizeof(SerializedServiceMask) * 8),
  * locations:
  * - The method opcodeSymbol in WireFormat.cc.
  * - WireFormatTest.cc's out-of-range test, if ILLEGAL_RPC_TYPE was changed.
+ * - You may need to modify the "callees" table in scripts/genLevels.py,
+ *   which keeps track of which RPCs invoke which other RPCs.
  */
 enum Opcode {
-    PING                      = 7,
-    PROXY_PING                = 8,
-    KILL                      = 9,
-    CREATE_TABLE              = 10,
-    GET_TABLE_ID              = 11,
-    DROP_TABLE                = 12,
-    READ                      = 13,
-    WRITE                     = 14,
-    REMOVE                    = 15,
-    ENLIST_SERVER             = 16,
-    GET_SERVER_LIST           = 17,
-    GET_TABLE_CONFIG          = 18,
-    RECOVER                   = 19,
-    HINT_SERVER_CRASHED       = 20,
-    RECOVERY_MASTER_FINISHED  = 21,
-    ENUMERATE                 = 22,
-    SET_MASTER_RECOVERY_INFO  = 23,
-    FILL_WITH_TEST_DATA       = 24,
-    MULTI_OP                  = 25,
-    GET_METRICS               = 26,
-    BACKUP_FREE               = 28,
-    BACKUP_GETRECOVERYDATA    = 29,
-    BACKUP_STARTREADINGDATA   = 31,
-    BACKUP_WRITE              = 32,
-    BACKUP_RECOVERYCOMPLETE   = 33,
-    BACKUP_QUIESCE            = 34,
-    UPDATE_SERVER_LIST        = 35,
-    BACKUP_STARTPARTITION     = 36,
-    DROP_TABLET_OWNERSHIP     = 39,
-    TAKE_TABLET_OWNERSHIP     = 40,
-    GET_HEAD_OF_LOG           = 42,
-    INCREMENT                 = 43,
-    PREP_FOR_MIGRATION        = 44,
-    RECEIVE_MIGRATION_DATA    = 45,
-    REASSIGN_TABLET_OWNERSHIP = 46,
-    MIGRATE_TABLET            = 47,
-    IS_REPLICA_NEEDED         = 48,
-    SPLIT_TABLET              = 49,
-    GET_SERVER_STATISTICS     = 50,
-    SET_RUNTIME_OPTION        = 51,
-    GET_SERVER_CONFIG         = 52,
-    GET_BACKUP_CONFIG         = 53,
-    GET_MASTER_CONFIG         = 55,
-    GET_LOG_METRICS           = 56,
-    VERIFY_MEMBERSHIP         = 57,
-    GET_RUNTIME_OPTION        = 58,
-    SERVER_CONTROL            = 59,
-    SERVER_CONTROL_ALL        = 60,
-    GET_SERVER_ID             = 61,
-    READ_KEYS_AND_VALUE       = 62,
-    LOOKUP_INDEX_KEYS         = 63,
-    READ_HASHES               = 64,
-    INSERT_INDEX_ENTRY        = 65,
-    REMOVE_INDEX_ENTRY        = 66,
-    CREATE_INDEX              = 67,
-    DROP_INDEX                = 68,
-    DROP_INDEXLET_OWNERSHIP   = 69,
-    TAKE_INDEXLET_OWNERSHIP   = 70,
-    ILLEGAL_RPC_TYPE          = 71, // 1 + the highest legitimate Opcode
+    PING                        = 7,
+    PROXY_PING                  = 8,
+    KILL                        = 9,
+    CREATE_TABLE                = 10,
+    GET_TABLE_ID                = 11,
+    DROP_TABLE                  = 12,
+    READ                        = 13,
+    WRITE                       = 14,
+    REMOVE                      = 15,
+    ENLIST_SERVER               = 16,
+    GET_SERVER_LIST             = 17,
+    GET_TABLE_CONFIG            = 18,
+    RECOVER                     = 19,
+    HINT_SERVER_CRASHED         = 20,
+    RECOVERY_MASTER_FINISHED    = 21,
+    ENUMERATE                   = 22,
+    SET_MASTER_RECOVERY_INFO    = 23,
+    FILL_WITH_TEST_DATA         = 24,
+    MULTI_OP                    = 25,
+    GET_METRICS                 = 26,
+    BACKUP_FREE                 = 28,
+    BACKUP_GETRECOVERYDATA      = 29,
+    BACKUP_STARTREADINGDATA     = 31,
+    BACKUP_WRITE                = 32,
+    BACKUP_RECOVERYCOMPLETE     = 33,
+    UPDATE_SERVER_LIST          = 35,
+    BACKUP_STARTPARTITION       = 36,
+    DROP_TABLET_OWNERSHIP       = 39,
+    TAKE_TABLET_OWNERSHIP       = 40,
+    GET_HEAD_OF_LOG             = 42,
+    INCREMENT                   = 43,
+    PREP_FOR_MIGRATION          = 44,
+    RECEIVE_MIGRATION_DATA      = 45,
+    REASSIGN_TABLET_OWNERSHIP   = 46,
+    MIGRATE_TABLET              = 47,
+    IS_REPLICA_NEEDED           = 48,
+    SPLIT_TABLET                = 49,
+    GET_SERVER_STATISTICS       = 50,
+    SET_RUNTIME_OPTION          = 51,
+    GET_SERVER_CONFIG           = 52,
+    GET_BACKUP_CONFIG           = 53,
+    GET_MASTER_CONFIG           = 55,
+    GET_LOG_METRICS             = 56,
+    VERIFY_MEMBERSHIP           = 57,
+    GET_RUNTIME_OPTION          = 58,
+    GET_LEASE_INFO              = 59,
+    RENEW_LEASE                 = 60,
+    SERVER_CONTROL              = 61,
+    SERVER_CONTROL_ALL          = 62,
+    GET_SERVER_ID               = 63,
+    READ_KEYS_AND_VALUE         = 64,
+    LOOKUP_INDEX_KEYS           = 65,
+    READ_HASHES                 = 66,
+    INSERT_INDEX_ENTRY          = 67,
+    REMOVE_INDEX_ENTRY          = 68,
+    CREATE_INDEX                = 69,
+    DROP_INDEX                  = 70,
+    DROP_INDEXLET_OWNERSHIP     = 71,
+    TAKE_INDEXLET_OWNERSHIP     = 72,
+    PREP_FOR_INDEXLET_MIGRATION = 73,
+    SPLIT_AND_MIGRATE_INDEXLET  = 74,
+    COORD_SPLIT_AND_MIGRATE_INDEXLET = 75,
+    TX_DECISION                 = 76,
+    TX_PREPARE                  = 77,
+    TX_REQUEST_ABORT            = 78,
+    TX_HINT_FAILED              = 79,
+    ILLEGAL_RPC_TYPE            = 80, // 1 + the highest legitimate Opcode
 };
 
 /**
@@ -142,7 +150,21 @@ enum ControlOp {
     START_PERF_COUNTERS         = 1008,
     STOP_PERF_COUNTERS          = 1009,
     LOG_MESSAGE                 = 1010,
+    RESET_METRICS               = 1011,
+    QUIESCE                     = 1012,
 };
+
+/**
+ * Used in linearizable RPCs to check whether or not the RPC can be processed.
+ */
+struct ClientLease {
+    uint64_t leaseId;           /// A cluster unique id for a specific lease.
+                                /// 0 is used to indicate invalid or expired id.
+    uint64_t leaseExpiration;   /// Cluster time after which the lease may have
+                                /// become invalid.
+    uint64_t timestamp;         /// Cluster time when this lease information was
+                                /// provided by the coordinator.
+} __attribute__((packed));
 
 /**
  * Each RPC request starts with this structure.
@@ -246,28 +268,16 @@ struct BackupGetRecoveryData {
             , certificate()
         {}
         Response(const ResponseCommon& common,
-                 const Segment::Certificate& certificate)
+                 const SegmentCertificate& certificate)
             : common(common)
             , certificate(certificate)
         {}
         ResponseCommon common;
-        Segment::Certificate certificate; ///< Certificate for the segment
-                                          ///< which follows this fields in
-                                          ///< the response field. Used by
-                                          ///< master to iterate over the
-                                          ///< segment.
-    } __attribute__((packed));
-};
-
-// Note: this RPC is supported by the coordinator service as well as backups.
-struct BackupQuiesce {
-    static const Opcode opcode = BACKUP_QUIESCE;
-    static const ServiceType service = BACKUP_SERVICE;
-    struct Request {
-        RequestCommonWithId common;
-    } __attribute__((packed));
-    struct Response {
-        ResponseCommon common;
+        SegmentCertificate certificate; ///< Certificate for the segment
+                                        ///< which follows this fields in
+                                        ///< the response field. Used by
+                                        ///< master to iterate over the
+                                        ///< segment.
     } __attribute__((packed));
 };
 
@@ -395,7 +405,7 @@ struct BackupWrite {
                 bool close,
                 bool primary,
                 bool certificateIncluded,
-                const Segment::Certificate& certificate)
+                const SegmentCertificate& certificate)
             : common(common)
             , masterId(masterId)
             , segmentId(segmentId)
@@ -426,11 +436,31 @@ struct BackupWrite {
                                   ///< true then it includes a valid certificate
                                   ///< that should be placed in the segment
                                   ///< after the data from this write.
-        Segment::Certificate certificate; ///< Certificate which should be
-                                          ///< written to storage
-                                          ///< following the data included
-                                          ///< in this rpc.
+        SegmentCertificate certificate; ///< Certificate which should be
+                                        ///< written to storage
+                                        ///< following the data included
+                                        ///< in this rpc.
         // Opaque byte string follows with data to write.
+    } __attribute__((packed));
+    struct Response {
+        ResponseCommon common;
+    } __attribute__((packed));
+};
+
+struct CoordSplitAndMigrateIndexlet {
+    static const Opcode opcode = COORD_SPLIT_AND_MIGRATE_INDEXLET;
+    static const ServiceType service = COORDINATOR_SERVICE;
+    struct Request {
+        RequestCommon common;
+        uint64_t newOwnerId;        // ServerId of the master to which the
+                                    // second indexlet resulting from the split
+                                    // should be migrated.
+        uint64_t tableId;           // Id of table to which the index belongs.
+        uint8_t indexId;            // Id of index.
+        uint16_t splitKeyLength;    // Length in bytes of splitKey.
+        // In buffer: The actual bytes for splitKey go here. splitKey
+        // indicates where to split the indexlet that contains this key.
+        // This will be the first key of the new indexlet.
     } __attribute__((packed));
     struct Response {
         ResponseCommon common;
@@ -476,7 +506,7 @@ struct CreateIndex {
     struct Request {
         RequestCommon common;
         uint64_t tableId;       // Id of table to which the index belongs.
-        uint8_t indexType;      // Type of index.
+        uint8_t indexType;      // Type of secondary keys in the index.
         uint8_t indexId;        // Id of secondary keys in the index.
         uint8_t numIndexlets;   // Number of indexlets to partition the index
                                 // key space.
@@ -633,6 +663,19 @@ struct GetHeadOfLog {
         ResponseCommon common;
         uint64_t headSegmentId;     // ID of head segment in the log.
         uint32_t headSegmentOffset; // Byte offset of head within the segment.
+    } __attribute__((packed));
+};
+
+struct GetLeaseInfo {
+    static const Opcode opcode = GET_LEASE_INFO;
+    static const ServiceType service = COORDINATOR_SERVICE;
+    struct Request {
+        RequestCommon common;
+        uint64_t leaseId;       // Id of lease whose info should be returned.
+    } __attribute__((packed));
+    struct Response {
+        ResponseCommon common;
+        ClientLease lease;      // Requested lease information.
     } __attribute__((packed));
 };
 
@@ -810,6 +853,9 @@ struct Increment {
     struct Request {
         RequestCommon common;
         uint64_t tableId;
+        ClientLease lease;
+        uint64_t rpcId;
+        uint64_t ackId;
         uint16_t keyLength;           // Length of the key in bytes.
                                       // The actual bytes of the key follow
                                       // immediately after this header.
@@ -1128,6 +1174,27 @@ struct Ping {
     } __attribute__((packed));
 };
 
+struct PrepForIndexletMigration {
+    static const Opcode opcode = PREP_FOR_INDEXLET_MIGRATION;
+    static const ServiceType service = MASTER_SERVICE;
+    struct Request {
+        RequestCommonWithId common;
+        uint64_t tableId;           // TableId of the indexlet we'll move.
+        uint8_t indexId;            // IndexId of the indexlet we'll move.
+        uint64_t backingTableId;    // Table id of the RAMCloud table that
+                                    // stores the objects encapsulating the
+                                    // nodes for this indexlet tree.
+        uint16_t firstKeyLength;    // Length of firstKey in bytes.
+        uint16_t firstNotOwnedKeyLength; // Length of firstNotOwnedKey in bytes.
+        // In buffer: The actual bytes for firstKey and firstNotOwnedKey
+        // go here. [firstKey, firstNotOwnedKey) defines the span of the
+        // indexlet being migrated to this server.
+    } __attribute__((packed));
+    struct Response {
+        ResponseCommon common;
+    } __attribute__((packed));
+};
+
 struct PrepForMigration {
     static const Opcode opcode = PREP_FOR_MIGRATION;
     static const ServiceType service = MASTER_SERVICE;
@@ -1136,8 +1203,6 @@ struct PrepForMigration {
         uint64_t tableId;           // TableId of the tablet we'll move.
         uint64_t firstKeyHash;      // First key in the tablet range.
         uint64_t lastKeyHash;       // Last key in the tablet range.
-        uint64_t expectedObjects;   // Expected number of objects to migrate.
-        uint64_t expectedBytes;     // Expected total object bytes to migrate.
     } __attribute__((packed));
     struct Response {
         ResponseCommon common;
@@ -1231,19 +1296,35 @@ struct ReceiveMigrationData {
             : common()
             , tableId()
             , firstKeyHash()
+            , isIndexletData(false)
+            , dataTableId()
+            , indexId()
+            , keyLength()
             , segmentBytes()
             , certificate()
         {}
         RequestCommonWithId common;
-        uint64_t tableId;           // Id of the table this data belongs to.
-        uint64_t firstKeyHash;      // Start of the tablet range for the data.
-        uint32_t segmentBytes;      // Length of the Segment containing migrated
-                                    // data immediately following this header.
-        Segment::Certificate certificate; // Certificate for the segment
-                                          // which follows this fields in
-                                          // the response field. Used by
-                                          // master to iterate over the
-                                          // segment.
+        uint64_t tableId;       // Id of the table this data belongs to.
+                                // If data being transfered belongs to an
+                                // indexlet, this is its backingTableId.
+        uint64_t firstKeyHash;  // Start of the tablet range for the data.
+        bool isIndexletData;    // True if data being migrated belongs to a
+                                // tablet which backs an indexlet.
+                                // False if data being migrated belongs to a
+                                // tablet that doesn't correspond to indexlet.
+        uint64_t dataTableId;   // TableId of the indexlet being migrated.
+        uint8_t indexId;        // IndexId of the indexlet being migrated.
+        uint16_t keyLength;     // Length of a key belonging to the indexlet.
+        uint32_t segmentBytes;  // Length of the Segment containing migrated
+                                // data following this header.
+        SegmentCertificate certificate; // Certificate for the segment
+                                        // being migrated. Used by
+                                        // master to iterate over the
+                                        // segment.
+        // In buffer: The actual bytes for a key belonging to the indexlet
+        // (used to determine which indexlet is being migrated);
+        // followed by:
+        // Segment containing migrated data.
     } __attribute__((packed));
     struct Response {
         ResponseCommon common;
@@ -1313,6 +1394,9 @@ struct Remove {
     struct Request {
         RequestCommon common;
         uint64_t tableId;
+        ClientLease lease;
+        uint64_t rpcId;
+        uint64_t ackId;
         uint16_t keyLength;           // Length of the key in bytes.
                                       // The actual key follows
                                       // immediately after this header.
@@ -1341,6 +1425,19 @@ struct RemoveIndexEntry {
     } __attribute__((packed));
     struct Response {
         ResponseCommon common;
+    } __attribute__((packed));
+};
+
+struct RenewLease {
+    static const Opcode opcode = RENEW_LEASE;
+    static const ServiceType service = COORDINATOR_SERVICE;
+    struct Request {
+        RequestCommon common;
+        uint64_t leaseId;
+    } __attribute__((packed));
+    struct Response {
+        ResponseCommon common;
+        ClientLease lease;
     } __attribute__((packed));
 };
 
@@ -1454,6 +1551,30 @@ struct SetRuntimeOption {
     } __attribute__((packed));
 };
 
+struct SplitAndMigrateIndexlet {
+    static const Opcode opcode = SPLIT_AND_MIGRATE_INDEXLET;
+    static const ServiceType service = MASTER_SERVICE;
+    struct Request {
+        RequestCommonWithId common;
+        uint64_t newOwnerId;        // ServerId of the master to which the
+                                    // second indexlet resulting from the split
+                                    // should be migrated.
+        uint64_t tableId;           // Id of table to which the index belongs.
+        uint8_t indexId;            // Id of index.
+        uint64_t currentBackingTableId; // Id of the backing table for the
+                                        // indexlet to be split.
+        uint64_t newBackingTableId; // Id of the backing table for the indexlet
+                                    // resulting from the split.
+        uint16_t splitKeyLength;    // Length in bytes of splitKey.
+        // In buffer: The actual bytes for splitKey go here. splitKey
+        // indicates where to split the indexlet that contains this key.
+        // This will be the first key of the new indexlet.
+    } __attribute__((packed));
+    struct Response {
+        ResponseCommon common;
+    } __attribute__((packed));
+};
+
 struct SplitMasterTablet {
     static const Opcode opcode = SPLIT_TABLET;
     static const ServiceType service = MASTER_SERVICE;
@@ -1507,18 +1628,228 @@ struct TakeIndexletOwnership {
     static const ServiceType service = MASTER_SERVICE;
     struct Request {
         RequestCommonWithId common;
-        uint64_t tableId;                   // Id of table to which the index
-                                            // belongs.
-        uint8_t indexId;                    // Type of index.
-        uint64_t backingTableId;           // Id of the table that will hold
-                                            // objects for this indexlet.
-        uint16_t firstKeyLength;            // Length of fistKey in bytes.
-        uint16_t firstNotOwnedKeyLength;    // Length of firstNotOwnedKey in
-                                            // bytes.
+        uint64_t tableId;                // Id of table to which the index
+                                         // belongs.
+        uint8_t indexId;                 // Id of index.
+        uint64_t backingTableId;         // Id of the table that will hold
+                                         // objects for this indexlet.
+        uint16_t firstKeyLength;         // Length of fistKey in bytes.
+        uint16_t firstNotOwnedKeyLength; // Length of firstNotOwnedKey in bytes.
         // In buffer: The actual bytes for firstKey and firstNotOwnedKey
         // go here. [firstKey, firstNotOwnedKey) defines the span of the
-        // indexlet.
+        // indexlet for which this server is taking ownership.
     } __attribute__((packed));
+    struct Response {
+        ResponseCommon common;
+    } __attribute__((packed));
+};
+
+/**
+ * Represents a single participating object in a transaction.
+ */
+struct TxParticipant {
+    uint64_t tableId;           // Table Id of the participant object.
+    uint64_t keyHash;           // Key Hash of the participant object.
+    uint64_t rpcId;             // rpcId of TxPrepare RPC assigned for
+                                // the participant object.
+
+    TxParticipant()
+        : tableId()
+        , keyHash()
+        , rpcId()
+    {}
+
+    TxParticipant(uint64_t tableId, uint64_t keyHash, uint64_t rpcId)
+        : tableId(tableId)
+        , keyHash(keyHash)
+        , rpcId(rpcId)
+    {
+    }
+
+    bool operator==(const TxParticipant &other) const {
+        return tableId == other.tableId &&
+               keyHash == other.keyHash &&
+               rpcId == other.rpcId;
+    }
+} __attribute__((packed));
+
+struct TxDecision {
+    static const Opcode opcode = Opcode::TX_DECISION;
+    static const ServiceType service = MASTER_SERVICE;
+
+    enum Decision { COMMIT,         // Indicate that transaction should commit.
+                    ABORT,          // Indicate that transaction should abort.
+                    UNDECIDED };    // Intermediate state; should never be sent.
+
+    struct Request {
+        RequestCommon common;
+        Decision decision;          // Result of a transaction commit attempt.
+        uint64_t leaseId;           // Id of the client lease associated with
+                                    // this transaction.
+        uint32_t participantCount;  // Number of local objects participating TX
+                                    // for this server.
+        // List of local Participants
+    } __attribute__((packed));
+
+    struct Response {
+        ResponseCommon common;
+    } __attribute__((packed));
+};
+
+struct TxPrepare {
+    static const Opcode opcode = Opcode::TX_PREPARE;
+    static const ServiceType service = MASTER_SERVICE;
+
+    /// Type of Tx Operation
+    /// Note: Make sure INVALID is always last.
+    /// A client may change opType of ReadOp from READ to READONLY
+    /// to use read-only transaction optimization.
+    enum OpType { READ, READONLY, REMOVE, WRITE, INVALID };
+
+    /// Possible participant server responses to the request to prepare the
+    /// included transaction operations for commit.
+    enum Vote { PREPARED,       // OK to commit if all servers agree.
+                ABORT,          // DO NOT commit; should abort commit.
+                COMMITTED };    // Committed directly; no Decision RPCs needed.
+                                // This optimization occurs when the transaction
+                                // only involves a single server (single prepare
+                                // RPC) and the server can unilaterally decide
+                                // to commit.
+
+    struct Request {
+        RequestCommon common;
+        ClientLease lease;          // Lease information for the requested
+                                    // transaction.  To ensure prepare requests
+                                    // are linearizable.
+        uint64_t clientTxId;        // Client provided transaction identifier
+                                    // which uniquely identifies transaction
+                                    // among transactions from the same client.
+                                    // Paired with the lease identifier, the
+                                    // clientTxId provides a system-wide unique
+                                    // identifier for this transaction.
+        uint64_t ackId;             // Id of the largest RPC id whose metadata
+                                    // can be garbage-collected.  Used for
+                                    // linearizability.
+        uint32_t participantCount;  // Number of all objects participating TX
+                                    // in whole cluster.
+        uint32_t opCount;           // Number of operations this RPC contains.
+
+        // Following this structure, a TxPrepare request message contains,
+        // - array of all TxParticipants of current transaction and
+        // - array of operations (ReadOp|RemoveOp|WriteOp){opCount}.
+
+        // A structure describing read operation which is a part of transaction
+        // prepare request.
+        struct ReadOp {
+            OpType type;
+            uint64_t tableId;
+            uint64_t rpcId;
+            uint16_t keyLength;
+            RejectRules rejectRules;
+
+            // In buffer: The actual key for this part
+            // follows immediately after this.
+            ReadOp(uint64_t tableId, uint64_t rpcId, uint16_t keyLength,
+                    RejectRules rejectRules, bool readOnly = false)
+                : type(readOnly ? OpType::READONLY : OpType::READ)
+                , tableId(tableId)
+                , rpcId(rpcId)
+                , keyLength(keyLength)
+                , rejectRules(rejectRules)
+            {
+            }
+        } __attribute__((packed));
+
+        // A structure describing remove operation which is a part of
+        // transaction prepare request.
+        struct RemoveOp {
+            OpType type;
+            uint64_t tableId;
+            uint64_t rpcId;
+            uint16_t keyLength;
+            RejectRules rejectRules;
+
+            // In buffer: The actual key for this part
+            // follows immediately after this.
+            RemoveOp(uint64_t tableId, uint64_t rpcId, uint16_t keyLength,
+                       RejectRules rejectRules)
+                : type(OpType::REMOVE)
+                , tableId(tableId)
+                , rpcId(rpcId)
+                , keyLength(keyLength)
+                , rejectRules(rejectRules)
+            {
+            }
+        } __attribute__((packed));
+
+        // A structure describing write operation which is a part of
+        // transaction prepare request.
+        struct WriteOp {
+            OpType type;
+            uint64_t tableId;
+            uint64_t rpcId;
+            uint32_t length;        // length of keysAndValue
+            RejectRules rejectRules;
+
+            // In buffer: KeysAndValue follow immediately after this
+            WriteOp(uint64_t tableId, uint64_t rpcId, uint32_t length,
+                        RejectRules rejectRules)
+                : type(OpType::WRITE)
+                , tableId(tableId)
+                , rpcId(rpcId)
+                , length(length)
+                , rejectRules(rejectRules)
+            {
+            }
+        } __attribute__((packed));
+    } __attribute__((packed));
+
+    struct Response {
+        ResponseCommon common;
+        Vote vote;
+    } __attribute__((packed));
+};
+
+struct TxRequestAbort {
+    static const Opcode opcode = Opcode::TX_REQUEST_ABORT;
+    static const ServiceType service = MASTER_SERVICE;
+
+    struct Request {
+        RequestCommon common;
+        uint64_t leaseId; //Recovery coordinator may not know about leaseTerm.
+                          //DM can set arbitrary leaseTerm anyway.
+        uint32_t participantCount; // Number of local objects participating TX
+                                   // in recipient server.
+
+        // Following this structure, a TxRequestAbort request message contains,
+        // - array of TxParticipants which are handled by recipient server.
+    } __attribute__((packed));
+
+    struct Response {
+        ResponseCommon common;
+        TxPrepare::Vote vote;
+    } __attribute__((packed));
+};
+
+struct TxHintFailed {
+    static const Opcode opcode = Opcode::TX_HINT_FAILED;
+    static const ServiceType service = MASTER_SERVICE;
+
+    struct Request {
+        RequestCommon common;
+        uint64_t leaseId;           // Id of the client lease associated with
+                                    // this transaction.
+        uint64_t clientTxId;        // Client provided transaction identifier
+                                    // which uniquely identifies transaction
+                                    // among transactions from the same client.
+                                    // Paired with the lease identifier, the
+                                    // clientTxId provides a system-wide unique
+                                    // identifier for this transaction.
+        uint32_t participantCount;  // Number of local objects participating TX
+                                    // for this server.
+        // List of local Participants
+    } __attribute__((packed));
+
     struct Response {
         ResponseCommon common;
     } __attribute__((packed));
@@ -1566,6 +1897,9 @@ struct Write {
     struct Request {
         RequestCommon common;
         uint64_t tableId;
+        ClientLease lease;
+        uint64_t rpcId;
+        uint64_t ackId;
         uint32_t length;              // Includes the total size of the
                                       // keysAndValue blob in bytes.These
                                       // follow immediately after this header
@@ -1603,4 +1937,3 @@ const char* opcodeSymbol(Buffer* buffer);
 }} // namespace WireFormat namespace RAMCloud
 
 #endif // RAMCLOUD_WIREFORMAT_H
-

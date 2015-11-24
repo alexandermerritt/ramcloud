@@ -1,4 +1,4 @@
-/* Copyright (c) 2014 Stanford University
+/* Copyright (c) 2014-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -13,6 +13,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include "Common.h"
 #include "Crc32C.h"
 #include "Object.h"
 #include "RamCloud.h"
@@ -84,7 +85,8 @@ Object::Object(uint64_t tableId,
  *      Primary key for this object
  * \param value
  *      Pointer to a single contiguous piece of memory that comprises this
- *      object's value.
+ *      object's value. This pointer is expected to remain valid for the
+ *      lifetime of the object.
  * \param valueLength
  *      Length of the value portion in bytes.
  * \param version
@@ -237,31 +239,38 @@ Object::assembleForLog(void* memBlock)
 
 /**
  * Append the the value associated with this object to a provided buffer.
- * This is a virtual copy and does not make a copy of the value.
+ * This is may be a virtual copy or it may be a hard copy of the value.
  * The caller must ensure that the source (of the value) remains valid
- * as long as the buffer exists.
+ * as long as the buffer exists in the case of a virtual copy.
  *
  * \param buffer
  *      The buffer to append the value to.
- * \param valueOffset
- *      Offset of the value in the keysAndValue portion of the object
  */
 void
-Object::appendValueToBuffer(Buffer* buffer, uint32_t valueOffset)
+Object::appendValueToBuffer(Buffer* buffer)
 {
-    if (keysAndValue) {
-        const uint8_t *ptr = reinterpret_cast<const uint8_t *>(keysAndValue);
-        buffer->append(ptr + valueOffset, getValueLength());
+    uint32_t valueOffset;
+    getValueOffset(&valueOffset);
+
+    // Prioritize using the keysAndValueBuffer to do a buffer-to-buffer
+    // copy as the Buffer class contains additional logic to safely
+    // append data from another buffer (RAM-688)
+    if (keysAndValueBuffer) {
+        buffer->append(keysAndValueBuffer, keysAndValueOffset + valueOffset,
+                getValueLength());
         return;
     }
 
-    buffer->append(keysAndValueBuffer, keysAndValueOffset + valueOffset,
-                   getValueLength());
+    const uint8_t *ptr = reinterpret_cast<const uint8_t *>(keysAndValue);
+    buffer->append(ptr + valueOffset, getValueLength());
 }
 
 /**
  * Append the cumulative key lengths, the keys and the value associated with
- * this object to a provided buffer.
+ * this object to a provided buffer. This is may be a virtual copy or it may
+ * be a hard copy of the keys and value. The caller must ensure that the
+ * source (of the keys and value) remains valid as long as the buffer
+ * exists in the case of a virtual copy.
  *
  * \param buffer
  *      The buffer to append the keys and the value to.
@@ -269,14 +278,16 @@ Object::appendValueToBuffer(Buffer* buffer, uint32_t valueOffset)
 void
 Object::appendKeysAndValueToBuffer(Buffer& buffer)
 {
-    if (keysAndValue) {
+    // Prioritize using the keysAndValueBuffer to do a buffer-to-buffer
+    // copy as the Buffer class contains additional logic to safely
+    // append data from another buffer (RAM-688)
+    if (keysAndValueBuffer)
+        // keysAndValueBuffer contains keyLengths, keys and value starting
+        // at keysAndValueOffset
+        buffer.append(keysAndValueBuffer, keysAndValueOffset,
+                keysAndValueLength);
+    else
         buffer.append(keysAndValue, keysAndValueLength);
-        return;
-    }
-
-    // keysAndValueBuffer contains keyLengths, keys and value starting
-    // at keysAndValueOffset
-    buffer.append(keysAndValueBuffer, keysAndValueOffset, keysAndValueLength);
 }
 
 /**
@@ -384,13 +395,16 @@ Object::appendKeysAndValueToBuffer(
  * \param buffer
  *      A buffer that can be used temporarily to store the keys and value
  *      for the object. Its lifetime must cover the lifetime of this Object.
+ * \param appendCopy
+ *      If true, keys and values will be copied to the end of buffer.  If false,
+ *      value will be appended using appendExternal.
  * \param [out] length
  *      Total length of keysAndValue
  */
 void
 Object::appendKeysAndValueToBuffer(
         Key& key, const void* value, uint32_t valueLength,
-        Buffer* buffer, uint32_t *length)
+        Buffer* buffer, bool appendCopy, uint32_t *length)
 {
     uint32_t primaryKeyInfoLength =
             KEY_INFO_LENGTH(1) + key.getStringKeyLength();
@@ -408,7 +422,25 @@ Object::appendKeysAndValueToBuffer(
     memcpy(keyInfo + sizeof(KeyCount), &keyLength, sizeof(KeyLength));
     memcpy(keyInfo + KEY_INFO_LENGTH(1), keyString, keyLength);
 
-    buffer->append(value, valueLength);
+    if (appendCopy) {
+        buffer->appendCopy(value, valueLength);
+    } else {
+        buffer->appendExternal(value, valueLength);
+    }
+}
+
+/**
+ * Change the tableId for the object, and correspondingly, recompute
+ * the checksum.
+ *
+ * \param newTableId
+ *      The tableId that this tombstone should refer to.
+ */
+void
+Object::changeTableId(uint64_t newTableId)
+{
+    header.tableId = newTableId;
+    header.checksum = computeChecksum();
 }
 
 /**
@@ -432,7 +464,7 @@ Object::fillKeyOffsets()
             keyOffsets = static_cast<const struct KeyOffsets *>(
                                 keysAndValueBuffer->getRange(
                                 keysAndValueOffset, KEY_INFO_LENGTH(numKeys)));
-            // check if the buffer is big enough
+            // Check if the keysAndValueBuffer had all the information required.
             if (!keyOffsets)
                 return false;
         }
@@ -493,7 +525,7 @@ Object::getKey(KeyIndex keyIndex, KeyLength *keyLength)
         return static_cast<const uint8_t *>(keysAndValue) + keyOffset;
     else
         return keysAndValueBuffer->getRange(keyOffset + keysAndValueOffset,
-                                            length);
+                length);
 }
 
 /**
@@ -606,13 +638,13 @@ Object::getValue(uint32_t *valueLength)
  * the object.
  *
  * \param[out] offset
- *      The offset of the value within keysAndValue
+ *      The offset of the value within keysAndValue.
  *
  * \return
  *      False if the object is malformed, True otherwise
  */
 bool
-Object::getValueOffset(uint16_t *offset)
+Object::getValueOffset(uint32_t *offset)
 {
     if (!fillKeyOffsets())
         return false;
@@ -627,7 +659,7 @@ Object::getValueOffset(uint16_t *offset)
     // is called only after a readKeysAndValueRpc and it should be relative
     // to the starting of keysAndValue
     if (offset)
-        *offset = downCast<uint16_t>(valueOffset);
+        *offset = valueOffset;
     return true;
 }
 
@@ -637,7 +669,7 @@ Object::getValueOffset(uint16_t *offset)
 uint32_t
 Object::getValueLength()
 {
-    uint16_t valueOffset;
+    uint32_t valueOffset;
     if (!getValueOffset(&valueOffset))
         return 0;
     return keysAndValueLength - valueOffset;
@@ -706,6 +738,33 @@ Object::setTimestamp(uint32_t timestamp)
 }
 
 /**
+ * Compute checksum onto the provided Crc32c instance. This function may be
+ * used to calculate checksum of big chunk containing Object.
+ *
+ * \param   crc this function updates this Crc32C object according to the
+ *          contents of object.
+ */
+void
+Object::applyChecksum(Crc32C *crc)
+{
+    // first compute the checksum on the object header excluding the
+    // checksum field
+    crc->update(reinterpret_cast<void *>(
+               reinterpret_cast<uint8_t*>(
+               &header) + sizeof(header.checksum)),
+               downCast<uint32_t>(sizeof(header) -
+               sizeof(header.checksum)));
+
+    // then compute the checksum on keysAndValue.
+    if (keysAndValue) {
+        crc->update(keysAndValue, keysAndValueLength);
+    } else {
+        crc->update(*keysAndValueBuffer, keysAndValueOffset,
+                   getKeysAndValueLength());
+    }
+}
+
+/**
  * Compute the object's checksum and return it.
  */
 uint32_t
@@ -723,7 +782,6 @@ Object::computeChecksum()
                sizeof(header.checksum)));
 
     // then compute the checksum on keysAndValue.
-
     if (keysAndValue) {
         crc.update(keysAndValue, keysAndValueLength);
     } else {
@@ -874,6 +932,20 @@ ObjectTombstone::appendKeyToBuffer(Buffer& buffer)
     }
 
     buffer.append(tombstoneBuffer, keyOffset, getKeyLength());
+}
+
+/**
+ * Change the tableId for the tombstone, and correspondingly, recompute
+ * the checksum.
+ *
+ * \param newTableId
+ *      The tableId that this tombstone should refer to.
+ */
+void
+ObjectTombstone::changeTableId(uint64_t newTableId)
+{
+    header.tableId = newTableId;
+    header.checksum = computeChecksum();
 }
 
 /**
@@ -1069,5 +1141,4 @@ ObjectSafeVersion::computeChecksum()
     crc.update(&header, downCast<uint32_t>(OFFSET_OF(Header, checksum)));
     return crc.getResult();
 }
-
 } // namespace RAMCloud

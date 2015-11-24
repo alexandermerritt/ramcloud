@@ -40,8 +40,9 @@ class TimeTrace {
     void record(const char* message, uint64_t timestamp = Cycles::rdtsc());
     void printToLog();
     string getTrace();
+    void reset();
 
-  PRIVATE:
+  public:
     void printInternal(string* s);
 
     /**
@@ -54,7 +55,7 @@ class TimeTrace {
     };
 
     // Total number of events that we can retain any given time.
-    static const int BUFFER_SIZE = 10000;
+    static const int BUFFER_SIZE = 100000;
 
     // Holds information from the most recent calls to the record method.
     Event events[BUFFER_SIZE];
@@ -67,6 +68,11 @@ class TimeTrace {
     // safe to add more records, since that could result in inconsistent
     // output from printInternal.
     volatile bool readerActive;
+
+    // Refers to the most recently created time trace; provides a convenient
+    // global variable for situations where no other TimeTrace pointer
+    // is readily available.
+    static TimeTrace* globalTimeTrace;
 };
 
 } // namespace RAMCloud

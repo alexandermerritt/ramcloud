@@ -16,9 +16,35 @@
 #include <sstream>
 
 #include "Util.h"
+#include "Cycles.h"
+#include "Logger.h"
 
 namespace RAMCloud {
 namespace Util {
+
+// Memory buffer used by spinAndCheckGaps.
+#define SPIN_BUFFER_SIZE 10000
+char spinBuffer[SPIN_BUFFER_SIZE];
+
+/**
+ * Sets the allowable set of cores for the current threadto include
+ * all of the available processors. It is used to restore a previously
+ * restricted affinity set back to the default (i.e. clears any
+ * affinity setting).
+ */
+void
+clearCpuAffinity(void)
+{
+    cpu_set_t cpuSet;
+    int numCpus;
+
+    numCpus = downCast<int>(sysconf(_SC_NPROCESSORS_ONLN));
+    CPU_ZERO(&cpuSet);
+    for (int cpu = 0; cpu < numCpus; cpu++) {
+        CPU_SET(cpu, &cpuSet);
+    }
+    assert(sched_setaffinity(0, sizeof(cpuSet), &cpuSet) == 0);
+}
 
 /**
  * Generate a random string.
@@ -80,6 +106,39 @@ hexDump(const void *buf, uint64_t bytes)
                    hex[12], hex[13], hex[14], hex[15], ascii);
     }
     return output.str();
+}
+
+/**
+ * This method has been used during performance testing. It executes
+ * in a tight loop copying small blocks of memory (anything to consume
+ * CPU cycles), and checks for gaps in execution that indicate the
+ * thread has been descheduled. It prints information for any gaps
+ * that occur.
+ * \param count
+ *      Number of iterations to execute before returning.
+ */
+void spinAndCheckGaps(int count)
+{
+    RAMCLOUD_LOG(NOTICE, "Spinner starting");
+    uint64_t prev = Cycles::rdtsc();
+    uint64_t tooLong = Cycles::fromNanoseconds(50000);
+    uint64_t lastGap = prev;
+    for (int i = 0; i < count; i++) {
+        int start = downCast<int>(generateRandom() % (SPIN_BUFFER_SIZE - 100));
+        int end = downCast<int>(generateRandom() % (SPIN_BUFFER_SIZE - 100));
+        memcpy(&spinBuffer[end], &spinBuffer[start], 50);
+        uint64_t current = Cycles::rdtsc();
+        if ((current - prev) >= tooLong) {
+            RAMCLOUD_LOG(NOTICE, "Spinner gap of %.1f us (%.2f ms since "
+                    "last gap, iteration %i)x",
+                    Cycles::toSeconds(current - prev)*1e06,
+                    Cycles::toSeconds(current-lastGap)*1e03,
+                    i);
+            lastGap = current;
+        }
+        prev = current;
+    }
+    RAMCLOUD_LOG(NOTICE, "Spinner done");
 }
 
 /**

@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -24,7 +24,7 @@
 #ifndef RAMCLOUD_CLIENTEXCEPTION_H
 #define RAMCLOUD_CLIENTEXCEPTION_H
 
-#include "Common.h"
+#include "Exception.h"
 #include "Status.h"
 
 namespace RAMCloud {
@@ -232,6 +232,15 @@ DEFINE_EXCEPTION(UnknownIndexException,
                  ClientException)
 DEFINE_EXCEPTION(InvalidParameterException,
                  STATUS_INVALID_PARAMETER,
+                 ClientException)
+DEFINE_EXCEPTION(StaleRpcException,
+                 STATUS_STALE_RPC,
+                 ClientException)
+DEFINE_EXCEPTION(ExpiredLeaseException,
+                 STATUS_EXPIRED_LEASE,
+                 ClientException)
+DEFINE_EXCEPTION(TxOpAfterCommit,
+                 STATUS_TX_OP_AFTER_COMMIT,
                  ClientException)
 
 } // namespace RAMCloud

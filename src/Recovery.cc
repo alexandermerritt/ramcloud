@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2013 Stanford University
+/* Copyright (c) 2010-2015 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -128,13 +128,14 @@ Recovery::splitTablets(vector<Tablet> *tablets,
     for (size_t i = 0; i < size; ++i) {
         Tablet* tablet = &tablets->at(i);
 
-        // Currently we didn't support split operation for index tablets.
-        // Therefore, if we found a tablet is an index tablet, we just skip
-        // the following operations.
+        // The backing table for an indexlet should not be split.
+        // This is because we want to recover an indexlet on a single server
+        // rather than splitting it up into smaller partitions sprayed across
+        // the cluster for better scalability of index range queries.
         if (tableManager->isIndexletTable(tablet->tableId))
             continue;
 
-        TableStats::Estimator::Entry stats = estimator->estimate(tablet);
+        TableStats::Estimator::Estimate stats = estimator->estimate(tablet);
 
         uint64_t startKeyHash = tablet->startKeyHash;
         uint64_t endKeyHash = tablet->endKeyHash;
@@ -261,7 +262,7 @@ struct Partition {
      *      Contains the tablet's estatmated stats information that is used to
      *      determine if said tablet would fit in the partition.
      */
-    bool fits(TableStats::Estimator::Entry estimate) {
+    bool fits(TableStats::Estimator::Estimate estimate) {
         if ((byteCount + estimate.byteCount) > Recovery::PARTITION_MAX_BYTES)
             return false;
         if ((recordCount + estimate.recordCount) >
@@ -277,7 +278,7 @@ struct Partition {
      *      Contains the estatmated stats information of the tablet that is to
      *      be assigned.
      */
-    void add(TableStats::Estimator::Entry estimate) {
+    void add(TableStats::Estimator::Estimate estimate) {
         byteCount += estimate.byteCount;
         recordCount += estimate.recordCount;
     }
@@ -896,7 +897,7 @@ Recovery::startBackups()
     }
 
     /* Broadcast 2: partition replicas into tablets for recovery masters */
-    TableStats::Estimator estimator(tableStats, &tablets);
+    TableStats::Estimator estimator(tableStats);
     partitionTablets(tablets, &estimator);
     LOG(NOTICE, "Partition Scheme for Recovery:\n%s",
                 dataToRecover.DebugString().c_str());
