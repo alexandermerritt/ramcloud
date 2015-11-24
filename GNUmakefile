@@ -16,6 +16,8 @@ COMPILER ?= gnu
 VALGRIND ?= no
 ONLOAD_DIR ?= /usr/local/openonload-201405
 
+LOCAL_PATH = /net/hp121/ihpcf/gpgpu-media/local
+
 ## Create a separate build directory for each git branch and for each arch
 OBJSUFFIX := $(shell git symbolic-ref -q HEAD | \
 	       sed -e s,refs/heads/,.,)
@@ -24,7 +26,8 @@ OBJDIR	:= obj$(OBJSUFFIX)
 
 TOP	:= $(shell echo $${PWD-`pwd`})
 GTEST_DIR ?= $(TOP)/gtest
-ZOOKEEPER_LIB ?= /usr/lib/x86_64-linux-gnu/libzookeeper_mt.a
+#ZOOKEEPER_LIB ?= /usr/lib/x86_64-linux-gnu/libzookeeper_mt.a
+ZOOKEEPER_LIB := $(LOCAL_PATH)/lib/libzookeeper_mt.a
 ZOOKEEPER_DIR ?= /usr/share/zookeeper
 
 
@@ -63,7 +66,7 @@ endif
 # Failed deconstructor inlines are generating noise
 # -Winline
 
-LIBS := $(EXTRALIBS) $(ZOOKEEPER_LIB) -lpcrecpp -lboost_program_options \
+LIBS := -L$(LOCAL_PATH)/lib -L$(LOCAL_PATH)/lib64 $(EXTRALIBS) $(ZOOKEEPER_LIB) -lpcrecpp -lboost_program_options \
 	-lprotobuf -lrt -lboost_filesystem -lboost_system \
 	-lpthread -lssl -lcrypto
 ifeq ($(DEBUG),yes)
@@ -71,7 +74,8 @@ ifeq ($(DEBUG),yes)
 LIBS += -rdynamic
 endif
 
-INCLUDES := -I$(TOP)/src -I$(TOP)/$(OBJDIR) -I$(GTEST_DIR)/include -I/usr/local/openonload-201405/src/include 
+INCLUDES := -I$(TOP)/src -I$(TOP)/$(OBJDIR) -I$(GTEST_DIR)/include -I/usr/local/openonload-201405/src/include \
+			-I$(LOCAL_PATH)/include
 
 CC ?= gcc
 CXX ?= g++
