@@ -104,6 +104,11 @@ class ObjectManager : public LogEntryHandlers,
     Status commitWrite(PreparedOp& op, Log::Reference& refToPreparedOp,
                         Buffer* removedObjBuffer = NULL);
 
+    void runTest(void); // launch thread
+    std::thread *testThread;
+    static void testThreadMain(ObjectManager*); // invokes doTest
+    void doTest(void);
+
     /**
      * The following three methods are used when multiple log entries
      * need to be committed to the log atomically.

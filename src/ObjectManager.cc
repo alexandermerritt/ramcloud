@@ -75,7 +75,8 @@ ObjectManager::ObjectManager(Context* context, ServerId* serverId,
                 UnackedRpcResults* unackedRpcResults,
                 PreparedOps* preparedOps,
                 TxRecoveryManager* txRecoveryManager)
-    : context(context)
+    : testThread(nullptr)
+    , context(context)
     , config(config)
     , tabletManager(tabletManager)
     , masterTableMetadata(masterTableMetadata)
@@ -100,6 +101,7 @@ ObjectManager::ObjectManager(Context* context, ServerId* serverId,
 {
     for (size_t i = 0; i < arrayLength(hashTableBucketLocks); i++)
         hashTableBucketLocks[i].setName("hashTableBucketLock");
+    runTest();
 }
 
 /**
@@ -111,6 +113,48 @@ ObjectManager::~ObjectManager()
         DIE("Can't destroy ObjectManager with active TombstoneProtectors.");
     }
     replicaManager.haltFailureMonitor();
+}
+
+void ObjectManager::doTest(void)
+{
+    Key key(42, "1", 1);
+    Buffer value;
+    Status status;
+    uint32_t len;
+
+    // create object and insert
+    {
+        Object obj(key, "HI", 3, 0, 0, value, &len);
+        // follow MasterService::takeTabletOwnership
+        syncChanges();
+        bool b = tabletManager->addTablet(42, 0UL, ~0UL,
+                TabletManager::TabletState::NORMAL);
+        assert( b );
+        status = writeObject(obj, NULL, NULL);
+        assert( status == STATUS_OK );
+        syncChanges();
+    }
+
+    // extract object and verify
+    {
+        ObjectBuffer obuf;
+        status = readObject(key, &obuf, NULL, NULL);
+        assert( status == STATUS_OK );
+        // reinterpret_cast<const char *>(obuf.getValue());
+    }
+}
+
+void ObjectManager::testThreadMain(ObjectManager *om)
+{
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    om->doTest();
+}
+
+void ObjectManager::runTest(void)
+{
+    testThread = new std::thread(testThreadMain, this);
+    if (!testThread)
+        abort();
 }
 
 /**
