@@ -89,6 +89,7 @@ MemoryMonitor::currentUsage()
         size_t count = fread(buffer, 1, sizeof(buffer) - 1, f);
         buffer[count] = 0;
         data = buffer;
+        fclose(f);
     }
 
     // Expected format of data in /proc/self/statm (see "man proc 5"):
