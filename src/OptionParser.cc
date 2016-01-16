@@ -103,7 +103,8 @@ void invokeGDB(int signum) {
        signal(SIGINT, SIG_DFL);
     char buf[256];
     snprintf(buf, sizeof(buf), "/usr/bin/gdb %s %d", executableName, getpid());
-    system(buf);
+    int i = system(buf);
+    (void)i;
 }
 
 /**
