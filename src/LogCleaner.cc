@@ -89,8 +89,8 @@ LogCleaner::LogCleaner(Context* context,
     // There's no point in doing compaction if we aren't replicating. It's
     // more efficient to just perform "disk" cleaning.
     if (config->master.numReplicas == 0) {
-        LOG(NOTICE, "Replication factor is 0; memory compaction disabled.");
-        disableInMemoryCleaning = true;
+        //LOG(NOTICE, "Replication factor is 0; memory compaction disabled.");
+        //disableInMemoryCleaning = true;
     }
 
     string balancerArg = config->master.cleanerBalancer;
