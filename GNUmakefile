@@ -9,7 +9,7 @@
 # variables in the file private/MakefragPrivateTop.
 include $(wildcard private/MakefragPrivateTop)
 
-DEBUG ?= yes
+DEBUG := no
 YIELD ?= no
 SSE ?= sse4.2
 COMPILER ?= gnu
@@ -81,7 +81,7 @@ CXXWARNS := $(COMWARNS) -Wno-non-template-friend -Woverloaded-virtual \
 		-Wcast-qual \
 		-Wcast-align -Wconversion
 ifeq ($(COMPILER),gnu)
-CXXWARNS += -Weffc++
+#CXXWARNS += -Weffc++
 endif
 # Too many false positives list:
 # -Wunreachable-code
@@ -170,13 +170,13 @@ CFLAGS_BASE := $(COMFLAGS) -std=gnu0x $(INCLUDES)
 CFLAGS_SILENT := $(CFLAGS_BASE)
 CFLAGS_NOWERROR := $(CFLAGS_BASE) $(CWARNS)
 # CFLAGS := $(CFLAGS_BASE) $(CWARNS)
-CFLAGS := $(CFLAGS_BASE) -Werror $(CWARNS)
+CFLAGS := $(CFLAGS_BASE) $(CWARNS)
 
 CXXFLAGS_BASE := $(COMFLAGS) -std=c++0x $(INCLUDES)
 CXXFLAGS_SILENT := $(CXXFLAGS_BASE) $(EXTRACXXFLAGS)
 CXXFLAGS_NOWERROR := $(CXXFLAGS_BASE) $(CXXWARNS) $(EXTRACXXFLAGS)
 # CXXFLAGS := $(CXXFLAGS_BASE) $(CXXWARNS) $(EXTRACXXFLAGS) $(PERF)
-CXXFLAGS := $(CXXFLAGS_BASE) -Werror $(CXXWARNS) $(EXTRACXXFLAGS) $(PERF)
+CXXFLAGS := $(CXXFLAGS_BASE) $(CXXWARNS) $(EXTRACXXFLAGS) $(PERF)
 
 ifeq ($(COMPILER),intel)
 CXXFLAGS = $(CXXFLAGS_BASE) $(CXXWARNS)
