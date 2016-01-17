@@ -78,7 +78,7 @@ Dispatch::Dispatch(bool hasDedicatedThread)
     , lockNeeded(0)
     , locked(0)
     , hasDedicatedThread(hasDedicatedThread)
-    , slowPollerCycles(Cycles::fromSeconds(.05))
+    , slowPollerCycles(Cycles::fromSeconds(.5))
     , profilerFlag(false)
     , totalElements(0)
     , pollingTimes(NULL)
@@ -299,6 +299,7 @@ Dispatch::run()
             PerfStats::threadStats.dispatchActiveCycles +=
                     currentTime - prev;
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
 

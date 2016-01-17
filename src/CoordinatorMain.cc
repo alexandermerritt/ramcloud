@@ -149,6 +149,7 @@ main(int argc, char *argv[])
         PingService pingService(&context);
         while (true) {
             context.dispatch->poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
         return 0;
     } catch (const std::exception& e) {
