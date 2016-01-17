@@ -233,7 +233,24 @@ main(int argc, char *argv[])
              "this value. Lower values cause the disk cleaner to run more "
              "frequently. Higher values do more in-memory cleaning and "
              "reduce the amount of backup disk bandwidth used during disk "
-             "cleaning.");
+             "cleaning.")
+
+            ("threadCount",
+             ProgramOptions::value<int>(
+                &config.scale.threadCount)->default_value(1), "")
+            ("keyCount",
+             ProgramOptions::value<int>(
+                &config.scale.keyCount)->default_value(1), "")
+            ("sharedKeys",
+             ProgramOptions::value<bool>(
+                &config.scale.sharedKeys)->default_value(true), "")
+            ("writePercent",
+             ProgramOptions::value<int>(
+                &config.scale.writePercent)->default_value(0), "")
+            ("valueSize",
+             ProgramOptions::value<int>(
+                &config.scale.valueSize)->default_value(100), "")
+            ; // end options
 
         OptionParser optionParser(serverOptions, argc, argv);
 

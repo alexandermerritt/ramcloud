@@ -66,6 +66,7 @@ struct ServerConfig {
         , maxCores(2)
         , master(testing)
         , backup(testing)
+        , scale()
     {}
 
     /**
@@ -90,6 +91,7 @@ struct ServerConfig {
         , maxCores(2)
         , master()
         , backup()
+        , scale()
     {}
 
   public:
@@ -471,6 +473,26 @@ struct ServerConfig {
          */
         size_t writeRateLimit;
     } backup;
+
+    // configuration options for SHM evaluation of the log-structured memory
+    // allocation
+    struct Scale {
+        public:
+            int threadCount;
+            int keyCount;
+            bool sharedKeys;    // true: threads share keys
+            int writePercent;  // 0-100
+            int valueSize;
+
+            Scale()
+                : threadCount(1)
+                , keyCount(1)
+                , sharedKeys(false)
+                , writePercent(0)
+                , valueSize(100)
+            {
+            }
+    } scale;
 
   public:
     /**

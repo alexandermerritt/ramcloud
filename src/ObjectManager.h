@@ -37,6 +37,8 @@
 #include "UnackedRpcResults.h"
 #include "LockTable.h"
 
+#include <atomic>
+
 namespace RAMCloud {
 
 /**
@@ -104,10 +106,12 @@ class ObjectManager : public LogEntryHandlers,
     Status commitWrite(PreparedOp& op, Log::Reference& refToPreparedOp,
                         Buffer* removedObjBuffer = NULL);
 
-    void runTest(void); // launch thread
-    std::thread *testThread;
-    static void testThreadMain(ObjectManager*); // invokes doTest
-    void doTest(void);
+    void runTest(void);
+    void doTest(int);
+
+    static void threadMain(ObjectManager*,int);
+    static void testMain(ObjectManager*);
+    std::atomic<int> threadTally;
 
     /**
      * The following three methods are used when multiple log entries

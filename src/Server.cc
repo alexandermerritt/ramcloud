@@ -114,6 +114,8 @@ Server::run()
     // servicing requests.
     enlistTimer.construct(this, formerServerId);
 
+    master.get()->objectManager.runTest();
+
     dispatch.run();
 }
 

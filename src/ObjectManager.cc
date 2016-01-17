@@ -34,6 +34,9 @@
 #include "WallTime.h"
 #include "MasterService.h"
 
+#include <sstream>
+#include <random>
+
 namespace RAMCloud {
 
 /**
@@ -75,7 +78,7 @@ ObjectManager::ObjectManager(Context* context, ServerId* serverId,
                 UnackedRpcResults* unackedRpcResults,
                 PreparedOps* preparedOps,
                 TxRecoveryManager* txRecoveryManager)
-    : testThread(nullptr)
+    : threadTally(0)
     , context(context)
     , config(config)
     , tabletManager(tabletManager)
@@ -101,7 +104,6 @@ ObjectManager::ObjectManager(Context* context, ServerId* serverId,
 {
     for (size_t i = 0; i < arrayLength(hashTableBucketLocks); i++)
         hashTableBucketLocks[i].setName("hashTableBucketLock");
-    runTest();
 }
 
 /**
@@ -115,46 +117,138 @@ ObjectManager::~ObjectManager()
     replicaManager.haltFailureMonitor();
 }
 
-void ObjectManager::doTest(void)
+#define keyCount        (config->scale.keyCount)
+#define writePercent    (config->scale.writePercent)
+#define valueSize       (config->scale.valueSize)
+#define sharedKeys      (config->scale.sharedKeys)
+
+// this method will be called by many threads in parallel
+// we assume threadId starts at 1
+void ObjectManager::doTest(int threadId)
 {
-    Key key(42, "1", 1);
-    Buffer value;
-    Status status;
-    uint32_t len;
+    std::random_device rd;
+    std::mt19937 gen(rd());
 
-    // create object and insert
-    {
-        Object obj(key, "HI", 3, 0, 0, value, &len);
-        // follow MasterService::takeTabletOwnership
-        syncChanges();
-        bool b = tabletManager->addTablet(42, 0UL, ~0UL,
-                TabletManager::TabletState::NORMAL);
-        assert( b );
-        status = writeObject(obj, NULL, NULL);
-        assert( status == STATUS_OK );
-        syncChanges();
-    }
+    std::uniform_int_distribution<long> rw(0, 99);
+    std::uniform_int_distribution<long> keyId(0, keyCount-1);
 
-    // extract object and verify
-    {
-        ObjectBuffer obuf;
-        status = readObject(key, &obuf, NULL, NULL);
-        assert( status == STATUS_OK );
-        // reinterpret_cast<const char *>(obuf.getValue());
+    void *b = malloc(valueSize);
+    char *keyStr = (char*)malloc(64);
+    assert( b );
+    assert( keyStr );
+
+    const long perThread = (keyCount / config->scale.threadCount);
+    const long off = (threadId-1) * perThread;
+
+    long iters = (keyCount << 2), l, key;
+    if (iters < (1L<<26)) iters = (1L<<26);
+    long nwrites = 0L;
+
+    uint64_t c1 = Cycles::rdtsc();
+    for (long n = 0; n < iters; n++) {
+        // choose key; if disjoint, limit keyId
+        key = keyId(gen);
+        if (!sharedKeys)
+            key = (key % perThread) + off;
+        l = snprintf(keyStr, 63, "%ld", key);
+        Key key(42, keyStr, (uint16_t)l);
+
+        // choose operation
+        if (rw(gen) < writePercent) {
+            Buffer value;
+            Object obj(key, b, valueSize, 0, 0, value);
+            bool ret = writeObject(obj, NULL, NULL);
+            assert( ret == STATUS_OK );
+            syncChanges();
+            nwrites++;
+        } else {
+            ObjectBuffer obuf;
+            bool ret = readObject(key, &obuf, NULL, NULL);
+            assert( ret == STATUS_OK );
+        }
     }
+    uint64_t c2 = Cycles::rdtsc();
+
+    LOG(NOTICE, "%d %lu %lu %4.2lf %lu %ld %ld %d %d %d %d %d",
+            threadId, c1, c2, Cycles::toSeconds(c2-c1), (c2-c1),
+            nwrites, iters, writePercent, valueSize,
+            sharedKeys, keyCount, config->scale.threadCount);
+
+    free(b);
+    free(keyStr);
+
+    // quite if we are last one
+    if (1 == threadTally.fetch_sub(1))
+        exit(0);
 }
 
-void ObjectManager::testThreadMain(ObjectManager *om)
+// static
+void ObjectManager::threadMain(ObjectManager *om, int threadId)
 {
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-    om->doTest();
+    om->doTest(threadId);
+}
+
+// static
+void ObjectManager::testMain(ObjectManager *om)
+{
+    const int threadCount = om->config->scale.threadCount;
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    LOG(NOTICE, "creating %d threads", threadCount);
+    for (int threadId = 1; threadId <= threadCount; threadId++)
+        new std::thread(threadMain, om, threadId);
+    LOG(NOTICE, "threadId start(cycles) end(cycles) elapsed(sec) elapsed(cycles)"
+            " nwrites requests writePercent valueSize"
+            " sharedKeys keyCount threadCount");
+}
+
+static void randString(char *str, long len)
+{
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static const char alphabet[] = "qwertyuiopasdfghjklzxcvbnm1234567890"
+                                   "QWERTYUIOPASDFGHJKLZXCVBNM"
+                                   "!@#$%^&*()-=_+[]{};:',.<>/?`~";
+    static std::uniform_int_distribution<long> idx(0, strlen(alphabet)-1);
+    for (long i = 0; i < (len-1); i++)
+        str[i] = alphabet[idx(gen)];
+    str[len-1] = '\0';
 }
 
 void ObjectManager::runTest(void)
 {
-    testThread = new std::thread(testThreadMain, this);
-    if (!testThread)
-        abort();
+    void *b;
+    char *keyStr;
+
+    // follow MasterService::takeTabletOwnership
+    syncChanges();
+    bool ret = tabletManager->addTablet(42, 0UL, ~0UL,
+            TabletManager::TabletState::NORMAL);
+    assert( ret );
+
+    keyStr = (char*)malloc(64);
+    b = malloc(valueSize);
+    assert( keyStr );
+    assert( b );
+    memset(b, 0xd4, valueSize);
+
+    threadTally.store(config->scale.threadCount);
+
+    // keys are numbered 0 - 999999
+    // if split among threads, they each take a partition
+    LOG(NOTICE, "creating %d keys, len %d", keyCount, valueSize);
+    for (long k = 0; k < keyCount; k++) {
+        Buffer value;
+        int l = snprintf(keyStr, 64, "%ld", k);
+        Key key(42, keyStr, l);
+        Object obj(key, b, valueSize, 0, 0, value);
+        bool ret = writeObject(obj, NULL, NULL);
+        assert( ret == STATUS_OK );
+        syncChanges();
+    }
+
+    free(b);
+    free(keyStr);
+    (new std::thread(testMain, this))->detach();
 }
 
 /**
