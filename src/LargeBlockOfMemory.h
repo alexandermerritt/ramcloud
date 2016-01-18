@@ -190,7 +190,9 @@ struct LargeBlockOfMemory {
             void *base = mmap(reinterpret_cast<void*>(tryBase),
                               length,
                               PROT_READ | PROT_WRITE,
-                              MAP_SHARED | extraFlags,
+                              // MAP_SHARED bottlenecks parallel
+                              // page-faulting in the kernel
+                              MAP_PRIVATE | extraFlags,
                               fd,
                               0);
 
@@ -234,11 +236,12 @@ struct LargeBlockOfMemory {
         // to do the trick and using it makes polling mmap for aligned base
         // addresses much slower.
         uint64_t pageSize = sysconf(_SC_PAGESIZE);
+#pragma omp parallel for
         for (uint64_t i = 0; i < length; i += pageSize) {
             reinterpret_cast<uint8_t*>(block)[i] = 0;
             if (!(i & ((1 << 30) - 1))) {
-                RAMCLOUD_LOG(NOTICE, "Populating pages; progress %lu of %lu MB",
-                             i / (1 << 20), length / (1 << 20));
+                RAMCLOUD_LOG(NOTICE, "Populating pages; progress %lu of %lu GB",
+                             i / (1 << 30), length / (1 << 30));
             }
         }
 #endif // !TESTING
