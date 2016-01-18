@@ -531,8 +531,8 @@ struct ServerConfig {
         if (masterTotalMemory.find("%") != string::npos) {
             string str = masterTotalMemory.substr(
                 0, masterTotalMemory.find("%"));
-            uint64_t pct = strtoull(str.c_str(), NULL, 10);
-            if (pct <= 0 || pct > 90)
+            float pct = strtof(str.c_str(), NULL);
+            if (pct <= 0. || pct > 90.)
                 throw Exception(HERE,
                     "invalid `MasterTotalMemory' option specified: "
                     "not within range 1-90%");
@@ -542,7 +542,7 @@ struct ServerConfig {
                     "Cannot determine total system memory - "
                     "`MasterTotalMemory' option must not be used");
             }
-            masterBytes = (masterBytes * pct) / 100;
+            masterBytes = (uint64_t)((masterBytes * pct) / 100.);
         } else {
             masterBytes = strtoull(masterTotalMemory.c_str(), NULL, 10);
             masterBytes *= (1024 * 1024);
