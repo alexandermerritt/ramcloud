@@ -122,6 +122,8 @@ ObjectManager::~ObjectManager()
 #define valueSize       (config->scale.valueSize)
 #define sharedKeys      (config->scale.sharedKeys)
 
+static std::atomic<long> threadBarrier;
+
 // this method will be called by many threads in parallel
 // we assume threadId starts at 1
 void ObjectManager::doTest(int threadId)
@@ -141,8 +143,12 @@ void ObjectManager::doTest(int threadId)
     const long off = (threadId-1) * perThread;
 
     long iters = (keyCount << 2), l, key;
-    if (iters < (1L<<26)) iters = (1L<<26);
+    if (iters < (1L<<15)) iters = (1L<<15);
     long nwrites = 0L;
+
+    threadBarrier--;
+    while (threadBarrier.load() > 0)
+        ;
 
     uint64_t c1 = Cycles::rdtsc();
     for (long n = 0; n < iters; n++) {
@@ -178,8 +184,11 @@ void ObjectManager::doTest(int threadId)
     free(keyStr);
 
     // quite if we are last one
-    if (1 == threadTally.fetch_sub(1))
+    if (1 == threadTally.fetch_sub(1)) {
+        SpinLock::logStatistics();
+        LOG(NOTICE, "Done");
         exit(0);
+    }
 }
 
 // static
@@ -232,6 +241,7 @@ void ObjectManager::runTest(void)
     memset(b, 0xd4, valueSize);
 
     threadTally.store(config->scale.threadCount);
+    threadBarrier.store(config->scale.threadCount);
 
     // keys are numbered 0 - 999999
     // if split among threads, they each take a partition

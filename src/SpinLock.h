@@ -41,6 +41,7 @@ class SpinLock {
     void unlock();
     void setName(string name);
     static void getStatistics(ProtoBuf::SpinLockStatistics* stats);
+    static void logStatistics(void);
     static int numLocks();
 
     /*

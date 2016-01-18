@@ -174,6 +174,26 @@ SpinLock::getStatistics(ProtoBuf::SpinLockStatistics* stats)
     }
 }
 
+void
+SpinLock::logStatistics(void)
+{
+    std::lock_guard<std::mutex> lock(*SpinLockTable::lock());
+    std::unordered_set<SpinLock*>* allLocks =
+            SpinLockTable::allLocks();
+    std::unordered_set<SpinLock*>::iterator it = allLocks->begin();
+    while (it != allLocks->end()) {
+        SpinLock* spin = *it;
+        float contendRatio = 100. *
+            ((float)spin->contendedAcquisitions/spin->acquisitions);
+        if (contendRatio >= 1.) {
+            RAMCLOUD_LOG(NOTICE, "%s %.4f %lu",
+                    spin->name.data(), contendRatio,
+                    Cycles::toNanoseconds(spin->contendedTicks));
+        }
+        it++;
+    }
+}
+
 /**
  * Return the total of SpinLocks currently in existence; intended
  * primarily for testing.
