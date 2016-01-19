@@ -38,7 +38,7 @@ endif
 
 # Determines whether or not RAMCloud is built with support for ZooKeeper as an
 # ExternalStorage implementation.
-ZOOKEEPER ?= yes
+ZOOKEEPER ?= no
 ifeq ($(ZOOKEEPER),yes)
 ZOOKEEPER_LIB ?= -lzookeeper_mt
 ZOOKEEPER_DIR ?= /usr/local/zookeeper-3.4.5
