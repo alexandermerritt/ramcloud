@@ -40,6 +40,8 @@ MemoryMonitor::MemoryMonitor(Dispatch* dispatch, double intervalSeconds,
     , intervalTicks(Cycles::fromSeconds(intervalSeconds))
     , lastPrintUsage(0)
     , threshold(threshold)
+    , lastVM(0L)
+    , lastRSS(0L)
 {
     start(0);
 }
@@ -54,8 +56,14 @@ MemoryMonitor::~MemoryMonitor()
 void
 MemoryMonitor::handleTimerEvent()
 {
-    // Check for changes greater than 1GB in either direction.
-    int current = currentUsage();
+    long vm, rss;
+    currentUsage(&vm, &rss);
+    if (vm != lastVM || rss != lastRSS) {
+        RAMCLOUD_LOG(NOTICE, "vm %lu rss %lu", vm, rss);
+        lastVM = vm;
+        lastRSS = rss;
+    }
+#if 0
     int delta = current - lastPrintUsage;
     if (delta >= threshold) {
         RAMCLOUD_LOG(NOTICE, "Memory usage now %d MB (increased %d MB)",
@@ -66,6 +74,7 @@ MemoryMonitor::handleTimerEvent()
                 current, -delta);
         lastPrintUsage = current;
     }
+#endif
     start(Cycles::rdtsc() + intervalTicks);
 }
 
@@ -73,8 +82,8 @@ MemoryMonitor::handleTimerEvent()
  * This method returns the current process' current usage of physical
  * memory (resident set size), measured in MB (1024*1024).
  */
-int
-MemoryMonitor::currentUsage()
+void
+MemoryMonitor::currentUsage(long *vm, long *rss)
 {
     char buffer[1000];
     const char* data;
@@ -96,15 +105,27 @@ MemoryMonitor::currentUsage()
     // totalSize residentSize ...
     // Contrary to man page, units are apparently 4KB pages.
     char* end;
-    uint64_t resident;
+    uint64_t mem;
     const char* p = strchr(data, ' ');
     if (p == NULL) {
         goto error;
     }
-    resident = strtoull(p+1, &end, 10);
-    if ((*end == ' ') && (resident != 0)) {
-        return downCast<int>((resident+255)/256);
+    mem = strtoull(data, &end, 10);
+    if ((*end == ' ') && (mem != 0)) {
+        if (vm)
+            *vm = downCast<int>((mem+255)/256);
+    } else {
+        goto error;
     }
+    mem = strtoull(p+1, &end, 10);
+    if ((*end == ' ') && (mem != 0)) {
+        if (rss)
+            *rss = downCast<int>((mem+255)/256);
+    } else {
+        goto error;
+    }
+
+    return;
 
   error:
     RAMCLOUD_DIE("Couldn't parse contents of /proc/self/statm: %s", data);

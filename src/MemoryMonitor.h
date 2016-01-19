@@ -30,7 +30,7 @@ class MemoryMonitor : public WorkerTimer {
     MemoryMonitor(Dispatch* dispatch, double intervalSeconds = 1.0,
             int threshold = 1024);
     ~MemoryMonitor();
-    static int currentUsage();
+    static void currentUsage(long*, long*);
 
   PRIVATE:
     void handleTimerEvent();
@@ -44,6 +44,8 @@ class MemoryMonitor : public WorkerTimer {
 
     // How much usage must change before we print a message, in MB.
     int threshold;
+
+    long lastVM, lastRSS;
 
     // If non-null, this value will be used instead of reading
     // /proc/self/statm; used for unit testing.
