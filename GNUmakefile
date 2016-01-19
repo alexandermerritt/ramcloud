@@ -133,17 +133,7 @@ ifdef ONLOAD_VERSION
 	COMFLAGS += -DONLOAD
 endif
 
-# Test whether Infiniband support is available. Avoids using $(COMFLAGS)
-# (particularly, -MD) which results in bad interactions with mergedeps.
-INFINIBAND = $(shell $(CXX) $(INCLUDES) $(EXTRACXXFLAGS) $(LIBS) -libverbs \
-                         -o /dev/null src/HaveInfiniband.cc \
-                         >/dev/null 2>&1 \
-                         && echo yes || echo no)
-
-ifeq ($(INFINIBAND),yes)
-COMFLAGS += -DINFINIBAND
-LIBS += -libverbs
-endif
+INFINIBAND := no
 
 # Determines whether or not to build RAMCloud with DPDK support, such as
 # a DPDK driver for FastTransport. Note: DPDK must be present at "./dpdk"
@@ -172,7 +162,7 @@ CFLAGS_NOWERROR := $(CFLAGS_BASE) $(CWARNS)
 # CFLAGS := $(CFLAGS_BASE) $(CWARNS)
 CFLAGS := $(CFLAGS_BASE) $(CWARNS)
 
-CXXFLAGS_BASE := $(COMFLAGS) -std=c++0x $(INCLUDES)
+CXXFLAGS_BASE := $(COMFLAGS) -std=c++11 $(INCLUDES)
 CXXFLAGS_SILENT := $(CXXFLAGS_BASE) $(EXTRACXXFLAGS)
 CXXFLAGS_NOWERROR := $(CXXFLAGS_BASE) $(CXXWARNS) $(EXTRACXXFLAGS)
 # CXXFLAGS := $(CXXFLAGS_BASE) $(CXXWARNS) $(EXTRACXXFLAGS) $(PERF)
