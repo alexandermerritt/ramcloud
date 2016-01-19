@@ -59,7 +59,7 @@ endif
 
 COMFLAGS := $(BASECFLAGS) $(OPTFLAG) -fno-strict-aliasing \
 	        -MD -m$(SSE) \
-	        $(DEBUGFLAGS)
+	        $(DEBUGFLAGS) -fopenmp
 ifeq ($(COMPILER),gnu)
 COMFLAGS += -march=core2
 endif
@@ -91,7 +91,7 @@ endif
 LIBS := $(EXTRALIBS) $(LOGCABIN_LIB) $(ZOOKEEPER_LIB) \
 	-lpcrecpp -lboost_program_options \
 	-lprotobuf -lrt -lboost_filesystem -lboost_system \
-	-lpthread -lssl -lcrypto
+	-lpthread -lssl -lcrypto -fopenmp
 ifeq ($(DEBUG),yes)
 # -rdynamic generates more useful backtraces when you have debugging symbols
 LIBS += -rdynamic
