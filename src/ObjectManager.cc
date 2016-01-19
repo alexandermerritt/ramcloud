@@ -1345,6 +1345,7 @@ ObjectManager::writeObject(Object& newObject, RejectRules* rejectRules,
     objectMap.prefetchBucket(key.getHash());
     HashTableBucketLock lock(*this, key);
 
+#if 0
     // If the tablet doesn't exist in the NORMAL state, we must plead ignorance.
     TabletManager::Tablet tablet;
     if (!tabletManager->getTablet(key, &tablet)) {
@@ -1356,6 +1357,7 @@ ObjectManager::writeObject(Object& newObject, RejectRules* rejectRules,
                     "Tablet is currently locked for migration!");
         return STATUS_UNKNOWN_TABLET;
     }
+#endif
 
     // If key is locked due to an in-progress transaction, we must wait.
     if (lockTable.isLockAcquired(key)) {
@@ -1465,7 +1467,9 @@ ObjectManager::writeObject(Object& newObject, RejectRules* rejectRules,
     if (rpcResult && rpcResultPtr)
         *rpcResultPtr = appends[rpcResultIndex].reference.toInteger();
 
+#if 0
     tabletManager->incrementWriteCount(key);
+#endif
     ++PerfStats::threadStats.writeCount;
     uint32_t valueLength = newObject.getValueLength();
     PerfStats::threadStats.writeObjectBytes += valueLength;
@@ -1484,6 +1488,7 @@ ObjectManager::writeObject(Object& newObject, RejectRules* rejectRules,
             appends[rpcResultIndex].buffer.size());
     }
 
+#if 0
     {
         uint64_t byteCount = appends[0].buffer.size();
         uint64_t recordCount = 1;
@@ -1501,6 +1506,7 @@ ObjectManager::writeObject(Object& newObject, RejectRules* rejectRules,
                               byteCount,
                               recordCount);
     }
+#endif
 
     return STATUS_OK;
 }
