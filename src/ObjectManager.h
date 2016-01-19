@@ -106,8 +106,10 @@ class ObjectManager : public LogEntryHandlers,
     Status commitWrite(PreparedOp& op, Log::Reference& refToPreparedOp,
                         Buffer* removedObjBuffer = NULL);
 
+    void restartTest(void);
     void runTest(void);
-    void doTest(int);
+    void doRandomRW(int);
+    void doInsertLFW(void);
 
     static void threadMain(ObjectManager*,int);
     static void testMain(ObjectManager*);

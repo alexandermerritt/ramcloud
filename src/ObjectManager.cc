@@ -123,10 +123,12 @@ ObjectManager::~ObjectManager()
 #define sharedKeys      (config->scale.sharedKeys)
 
 static std::atomic<long> threadBarrier;
+static int threadCount = 0;
+
 
 // this method will be called by many threads in parallel
 // we assume threadId starts at 1
-void ObjectManager::doTest(int threadId)
+void ObjectManager::doRandomRW(int threadId)
 {
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -139,11 +141,12 @@ void ObjectManager::doTest(int threadId)
     assert( b );
     assert( keyStr );
 
-    const long perThread = (keyCount / config->scale.threadCount);
+    const long perThread = (keyCount / threadCount);
     const long off = (threadId-1) * perThread;
 
-    long iters = (keyCount << 2), l, key;
-    if (iters < (1L<<15)) iters = (1L<<15);
+    long iters = (keyCount >> 1);
+    long l, key_;
+    if (iters < (1L<<20)) iters = (1L<<20);
     long nwrites = 0L;
 
     threadBarrier--;
@@ -153,10 +156,10 @@ void ObjectManager::doTest(int threadId)
     uint64_t c1 = Cycles::rdtsc();
     for (long n = 0; n < iters; n++) {
         // choose key; if disjoint, limit keyId
-        key = keyId(gen);
+        key_ = keyId(gen);
         if (!sharedKeys)
-            key = (key % perThread) + off;
-        l = snprintf(keyStr, 63, "%ld", key);
+            key_ = (key_ % perThread) + off;
+        l = snprintf(keyStr, 63, "%ld", key_);
         Key key(42, keyStr, (uint16_t)l);
 
         // choose operation
@@ -178,15 +181,63 @@ void ObjectManager::doTest(int threadId)
     LOG(NOTICE, "%d %lu %lu %4.2lf %lu %ld %ld %d %d %d %d %d",
             threadId, c1, c2, Cycles::toSeconds(c2-c1), (c2-c1),
             nwrites, iters, writePercent, valueSize,
-            sharedKeys, keyCount, config->scale.threadCount);
+            sharedKeys, keyCount, threadCount);
 
     free(b);
     free(keyStr);
 
-    // quite if we are last one
+    // quit if we are last one
     if (1 == threadTally.fetch_sub(1)) {
         SpinLock::logStatistics();
         LOG(NOTICE, "Done");
+#if 0
+        if (threadCount < 256) {
+            threadCount <<= 1;
+            restartTest();
+        } else
+#endif
+        {
+            exit(0);
+        }
+    }
+}
+
+void ObjectManager::doInsertLFW(void)
+{
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    const float lfw_mean = 14234, lfw_sd = 2271;
+    std::normal_distribution<float> d(lfw_mean, lfw_sd);
+
+    void *b = malloc(static_cast<long>(lfw_mean)<<5);
+    char *keyStr = (char*)malloc(64);
+    assert( b );
+    assert( keyStr );
+
+    // fill it up until it crashes
+    // never replace any existing object (cleaner will not be used)
+    long key_ = 1L, totalSize = 0L;
+    auto c1 = Cycles::rdtsc();
+    try {
+        while (true) {
+            int l = snprintf(keyStr, 63, "%ld", key_);
+            Key key(42, keyStr, (uint16_t)l);
+            long s = static_cast<long>(d(gen));
+            Buffer value;
+            Object obj(key, b, s, 0, 0, value);
+            bool ret = writeObject(obj, NULL, NULL);
+            assert( ret == STATUS_OK );
+            syncChanges();
+            key_++;
+            totalSize += s;
+        }
+    }
+    // Thrown when we run out of memory
+    catch (RetryException &e) {
+        RAMCLOUD_LOG(NOTICE, "OOM; keys %lu totalSize %lu time %4.2f sec",
+                key_-1, totalSize,
+                Cycles::toSeconds(Cycles::rdtsc() - c1));
+        RAMCLOUD_LOG(NOTICE, "Check above for last report by MemoryMonitor");
         exit(0);
     }
 }
@@ -194,13 +245,15 @@ void ObjectManager::doTest(int threadId)
 // static
 void ObjectManager::threadMain(ObjectManager *om, int threadId)
 {
-    om->doTest(threadId);
+    // NOTE only have one test uncommented at any time!
+
+    om->doRandomRW(threadId);
+    //om->doInsertLFW(); // XXX only with --threadCount 1
 }
 
 // static
 void ObjectManager::testMain(ObjectManager *om)
 {
-    const int threadCount = om->config->scale.threadCount;
     std::this_thread::sleep_for(std::chrono::seconds(10));
     LOG(NOTICE, "creating %d threads", threadCount);
     for (int threadId = 1; threadId <= threadCount; threadId++)
@@ -223,10 +276,20 @@ static void randString(char *str, long len)
     str[len-1] = '\0';
 }
 
+void ObjectManager::restartTest(void)
+{
+    // skip adding the keys, etc.
+    threadTally.store(threadCount);
+    threadBarrier.store(threadCount);
+    (new std::thread(testMain, this))->detach();
+}
+
 void ObjectManager::runTest(void)
 {
     void *b;
     char *keyStr;
+
+    threadCount = config->scale.threadCount;
 
     // follow MasterService::takeTabletOwnership
     syncChanges();
@@ -240,12 +303,10 @@ void ObjectManager::runTest(void)
     assert( b );
     memset(b, 0xd4, valueSize);
 
-    threadTally.store(config->scale.threadCount);
-    threadBarrier.store(config->scale.threadCount);
-
     // keys are numbered 0 - 999999
     // if split among threads, they each take a partition
     LOG(NOTICE, "creating %d keys, len %d", keyCount, valueSize);
+    uint64_t c1 = Cycles::rdtsc();
     for (long k = 0; k < keyCount; k++) {
         Buffer value;
         int l = snprintf(keyStr, 64, "%ld", k);
@@ -255,10 +316,16 @@ void ObjectManager::runTest(void)
         assert( ret == STATUS_OK );
         syncChanges();
     }
+    uint64_t c2 = Cycles::rdtsc();
+    LOG(NOTICE, "appending %d keys took %4.2f",
+            keyCount, Cycles::toSeconds(c2-c1));
 
     free(b);
     free(keyStr);
-    (new std::thread(testMain, this))->detach();
+
+    log.enableCleaner();
+
+    restartTest();
 }
 
 /**
