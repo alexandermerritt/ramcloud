@@ -235,14 +235,17 @@ struct LargeBlockOfMemory {
         // Force the OS to populate backing pages.  MAP_POPULATE doesn't seem
         // to do the trick and using it makes polling mmap for aligned base
         // addresses much slower.
+        RAMCLOUD_LOG(NOTICE, "Populating pages in parallel; total %lu GiB", length>>30);
         uint64_t pageSize = sysconf(_SC_PAGESIZE);
 #pragma omp parallel for
         for (uint64_t i = 0; i < length; i += pageSize) {
             reinterpret_cast<uint8_t*>(block)[i] = 0;
+#if 0
             if (!(i & ((1 << 30) - 1))) {
                 RAMCLOUD_LOG(NOTICE, "Populating pages; progress %lu of %lu GB",
                              i / (1 << 30), length / (1 << 30));
             }
+#endif
         }
 #endif // !TESTING
 
