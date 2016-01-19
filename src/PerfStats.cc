@@ -70,6 +70,7 @@ PerfStats::registerStats(PerfStats* stats)
 void
 PerfStats::collectStats(PerfStats* total)
 {
+#if 0 // remove stupid lock contention at-scale
     std::lock_guard<SpinLock> lock(mutex);
     memset(total, 0, sizeof(*total));
     total->collectionTime = Cycles::rdtsc();
@@ -111,6 +112,7 @@ PerfStats::collectStats(PerfStats* total)
         total->temp4 += stats->temp4;
         total->temp5 += stats->temp5;
     }
+#endif
 }
 
 /**
