@@ -325,6 +325,10 @@ main(int argc, char *argv[])
         // Re-parse the options to override coordinator provided defaults.
         OptionParser optionReparser(serverOptions, argc, argv);
 
+        // XXX Force no backups (shm branch is in-memory only) and so
+        // we do not have to specify -r 0 every time.
+        config.master.numReplicas = 0;
+
         if (!backupOnly) {
             LOG(NOTICE, "Using %u backups", config.master.numReplicas);
             config.setLogAndHashTableSize(masterTotalMemory, hashTableMemory);
