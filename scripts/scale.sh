@@ -6,39 +6,42 @@ OBJDIR=../obj.shm
 COORD=$OBJDIR/coordinator
 SERVER=$OBJDIR/server
 
+# values are log2
+THREADS_FROM=0
+THREADS_TO=0
+# more memory means more hash table buckets in RC
+TOTAL_MEMORY=35
+KEYS=27
+HT_MEMORY=27
 
-THREADS_FROM=1
-THREADS_TO=16
-
-# log base 2
-KEYS_FROM=16
-KEYS_TO=20
-
+# normal values
 WRITEPERCENT=0
-VALUESIZE=100
+VALUE_SIZE=100
 
-#PRECMD="numactl -C 10-23"
-PRECMD="sudo chrt --rr 90"
-ARGS="-M -t 5% -r 0"
+#PRECMD="sudo chrt --rr 90 numactl --all --interleave=0-15"
+PRECMD="sudo chrt --rr 90 numactl --all"
+echo "COMMAND PREFIX $PRECMD"
 
-for ((s=0;s<=1;s++)); do
-    for ((k=KEYS_FROM;k<=KEYS_TO;k++)); do
-        keys=$((1<<k))
-        for ((t=THREADS_FROM;t<=THREADS_TO;t++)); do
-            for ((iter=0;iter<3;iter++)); do
-                ($COORD 2>&1) >/dev/null &
-                sleep 2
-                $PRECMD $SERVER $ARGS \
-                    --threadCount $t \
-                    --keyCount $keys \
-                    --sharedKeys $s \
-                    --writePercent $WRITEPERCENT \
-                    --valueSize $VALUESIZE
-                killall coordinator
-                sleep 1
-            done
-        done
-    done
+# RC expects memory specified in MiB, so shift
+ARGS="-M -t $((1<<(TOTAL_MEMORY-20))) -h $((1<<(HT_MEMORY-20))) -r 0"
+echo "ARGS $ARGS"
+
+ULIMIT=unlimited
+ulimit -l $ULIMIT
+echo "ULIMIT -l $ULIMIT"
+
+keys=$((1<<KEYS))
+for ((t=THREADS_FROM;t<=THREADS_TO;t++)); do
+    threads=$((1<<t))
+    nohup $COORD &
+    sleep 2
+    $PRECMD $SERVER $ARGS \
+        --threadCount $threads \
+        --keyCount $keys \
+        --sharedKeys 1 \
+        --writePercent $WRITEPERCENT \
+        --valueSize $VALUE_SIZE
+    killall coordinator
+    sleep 1
 done
-
 
